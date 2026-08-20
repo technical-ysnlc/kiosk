@@ -79,7 +79,7 @@ $AssignedAccessBackupPath = Join-Path $Root 'AssignedAccess-BeforeKiosk.txt'
 $AssignedAccessAbsentMarker = Join-Path $Root 'AssignedAccess-WasAbsent.marker'
 $ServiceBackupPath = Join-Path $Root 'ServiceState-BeforeKiosk.json'
 $ShortcutRoot = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\YSNLC School'
-$KioskVersion = '2.1.1'
+$KioskVersion = '2.1.2'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -668,7 +668,9 @@ function Build-AssignedAccessXml {
     }
     $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + 'Student Files.lnk' })
 
-    $startPinsJson = ([ordered]@{ pinnedList = @($pinLinks) } | ConvertTo-Json -Depth 5 -Compress)
+    # PowerShell 5.1 can throw 'Argument types do not match' when @() wraps a generic List[object].
+    # Convert explicitly to a CLR array for compatibility across Windows 11 PowerShell 5.1 builds.
+    $startPinsJson = ([ordered]@{ pinnedList = $pinLinks.ToArray() } | ConvertTo-Json -Depth 5 -Compress)
     $allowedAppsXml = $allowedApps -join "`r`n"
 
     return @"
@@ -984,7 +986,7 @@ function Get-EnabledStandardLocalUsers {
         })
     }
 
-    return @($remaining)
+    return $remaining.ToArray()
 }
 
 function Assert-NoEnabledStandardUsersRemain {
@@ -1076,7 +1078,7 @@ function Test-HardPendingRestart {
             $reasons.Add($path)
         }
     }
-    return @($reasons)
+    return $reasons.ToArray()
 }
 
 function Test-SoftPendingRestart {
@@ -1345,7 +1347,7 @@ function Invoke-KioskPreflight {
         Version = $KioskVersion
         Generated = (Get-Date).ToString('o')
         CanInstall = $canInstall
-        Checks = @($checks)
+        Checks = $checks.ToArray()
     }
 
     Write-JsonFile -InputObject $result -Path $PreflightJsonPath
@@ -1649,6 +1651,9 @@ try {
     }
 } catch {
     Write-Log $_.Exception.Message 'ERROR'
+    if ($_.ScriptStackTrace) {
+        Write-Log ('PowerShell stack: ' + (($_.ScriptStackTrace -replace '[\r\n]+', ' | '))) 'ERROR'
+    }
     $report = $null
     try {
         $report = Write-DiagnosticReport
