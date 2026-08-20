@@ -1,1 +1,169 @@
+name: Update kiosk manifest
 
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - setup.ps1
+      - Update-SchoolQuizKiosk.ps1
+      - .github/workflows/update-manifest.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kiosk-update-manifest
+  cancel-in-progress: true
+
+jobs:
+  build-manifest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate scripts and generate update.json
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setupPath = Join-Path $env:GITHUB_WORKSPACE 'setup.ps1'
+          $updaterPath = Join-Path $env:GITHUB_WORKSPACE 'Update-SchoolQuizKiosk.ps1'
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE 'update.json'
+
+          function Assert-PowerShellSyntax {
+              param(
+                  [Parameter(Mandatory = $true)][string]$Path,
+                  [Parameter(Mandatory = $true)][string]$DisplayName
+              )
+
+              if (-not (Test-Path -LiteralPath $Path)) {
+                  throw "$DisplayName was not found at $Path"
+              }
+
+              $tokens = $null
+              $parseErrors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                  $Path,
+                  [ref]$tokens,
+                  [ref]$parseErrors
+              ) | Out-Null
+
+              if ($parseErrors -and $parseErrors.Count -gt 0) {
+                  $details = ($parseErrors | ForEach-Object { $_.Message }) -join '; '
+                  throw "$DisplayName failed PowerShell syntax validation: $details"
+              }
+
+              $firstLine = Get-Content -LiteralPath $Path -TotalCount 1
+              if ($firstLine -notmatch '^#requires\s+-Version\s+5\.1') {
+                  throw "$DisplayName must declare #requires -Version 5.1 on its first line."
+              }
+          }
+
+          function Get-EmbeddedVersion {
+              param(
+                  [Parameter(Mandatory = $true)][string]$Path,
+                  [Parameter(Mandatory = $true)][string]$VariableName
+              )
+
+              $content = Get-Content -LiteralPath $Path -Raw
+              $escapedName = [regex]::Escape($VariableName)
+              $pattern = '(?m)^\s*\${0}\s*=\s*''(?<version>\d+(?:\.\d+){{2,3}})''\s*$' -f $escapedName
+              $match = [regex]::Match($content, $pattern)
+              if (-not $match.Success) {
+                  throw "$Path does not contain a valid `$$VariableName assignment."
+              }
+
+              return $match.Groups['version'].Value
+          }
+
+          Assert-PowerShellSyntax -Path $setupPath -DisplayName 'setup.ps1'
+          Assert-PowerShellSyntax -Path $updaterPath -DisplayName 'Update-SchoolQuizKiosk.ps1'
+
+          $setupVersionText = Get-EmbeddedVersion -Path $setupPath -VariableName 'KioskVersion'
+          $updaterVersionText = Get-EmbeddedVersion -Path $updaterPath -VariableName 'UpdaterVersion'
+          $setupVersion = [version]$setupVersionText
+          $updaterVersion = [version]$updaterVersionText
+          $setupSha256 = (Get-FileHash -LiteralPath $setupPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $updaterSha256 = (Get-FileHash -LiteralPath $updaterPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $sourceCommit = (& git log -1 --format=%H -- setup.ps1 Update-SchoolQuizKiosk.ps1).Trim()
+          if ($sourceCommit -notmatch '^[A-Fa-f0-9]{40}$') {
+              throw "Could not determine the Git commit containing the current scripts: $sourceCommit"
+          }
+          $sourceCommit = $sourceCommit.ToLowerInvariant()
+
+          $publishedUtc = [DateTime]::UtcNow.ToString('o')
+          if (Test-Path -LiteralPath $manifestPath) {
+              $old = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+              $oldSetupVersion = [version]([string]$old.version)
+              $oldSetupSha256 = ([string]$old.sha256).ToLowerInvariant()
+
+              if ($setupVersion -lt $oldSetupVersion) {
+                  throw "setup.ps1 version $setupVersion is lower than published version $oldSetupVersion."
+              }
+              if ($oldSetupSha256 -ne $setupSha256 -and $setupVersion -le $oldSetupVersion) {
+                  throw "setup.ps1 changed, but `$KioskVersion was not increased above $oldSetupVersion."
+              }
+
+              if (
+                  $old.PSObject.Properties.Name -contains 'updaterVersion' -and
+                  $old.PSObject.Properties.Name -contains 'updaterSha256'
+              ) {
+                  $oldUpdaterVersion = [version]([string]$old.updaterVersion)
+                  $oldUpdaterSha256 = ([string]$old.updaterSha256).ToLowerInvariant()
+
+                  if ($updaterVersion -lt $oldUpdaterVersion) {
+                      throw "Updater version $updaterVersion is lower than published version $oldUpdaterVersion."
+                  }
+                  if ($oldUpdaterSha256 -ne $updaterSha256 -and $updaterVersion -le $oldUpdaterVersion) {
+                      throw "Update-SchoolQuizKiosk.ps1 changed, but `$UpdaterVersion was not increased above $oldUpdaterVersion."
+                  }
+              }
+
+              if (
+                  [string]$old.version -eq $setupVersionText -and
+                  ([string]$old.sha256).ToLowerInvariant() -eq $setupSha256 -and
+                  [string]$old.updaterVersion -eq $updaterVersionText -and
+                  ([string]$old.updaterSha256).ToLowerInvariant() -eq $updaterSha256 -and
+                  [string]$old.sourceCommit -eq $sourceCommit -and
+                  -not [string]::IsNullOrWhiteSpace([string]$old.publishedUtc)
+              ) {
+                  $publishedUtc = [string]$old.publishedUtc
+              }
+          }
+
+          $manifest = [ordered]@{
+              schemaVersion         = 1
+              productId             = 'school-quiz-kiosk'
+              version               = $setupVersionText
+              scriptUrl             = "https://raw.githubusercontent.com/technical-ysnlc/kiosk/$sourceCommit/setup.ps1"
+              sha256                = $setupSha256
+              minimumUpdaterVersion = '1.0.0'
+              updaterVersion        = $updaterVersionText
+              updaterUrl            = "https://raw.githubusercontent.com/technical-ysnlc/kiosk/$sourceCommit/Update-SchoolQuizKiosk.ps1"
+              updaterSha256         = $updaterSha256
+              sourceCommit          = $sourceCommit
+              publishedUtc          = $publishedUtc
+          }
+
+          $json = $manifest | ConvertTo-Json -Depth 5
+          Set-Content -LiteralPath $manifestPath -Value $json -Encoding utf8NoBOM
+
+      - name: Commit generated manifest
+        shell: bash
+        run: |
+          if [[ -z "$(git status --porcelain -- update.json)" ]]; then
+            echo "update.json is already current."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          git commit -m "chore: refresh kiosk update manifest"
+          git push origin HEAD:main
