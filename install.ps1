@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$BootstrapVersion = '1.0.0'
+$BootstrapVersion = '1.0.1'
 $ManifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPath = '/technical-ysnlc/kiosk/'
@@ -135,7 +135,7 @@ function Assert-PowerShellPayload {
 
     if ($parseErrors -and $parseErrors.Count -gt 0) {
         $details = ($parseErrors | ForEach-Object { $_.Message }) -join '; '
-        throw "PowerShell syntax validation failed for $Path: $details"
+        throw "PowerShell syntax validation failed for ${Path}: $details"
     }
 
     $firstLine = Get-Content -LiteralPath $Path -TotalCount 1 -Encoding UTF8
