@@ -1,11 +1,11 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
   Installs, removes, or diagnoses a restricted multi-app school workstation.
 
 .DESCRIPTION
   - Uses Windows Assigned Access restricted user experience (multi-app).
-  - Auto-creates and auto-signs-in a managed standard account named on-screen as YSNLC App User.
+  - Auto-creates and auto-signs-in a managed standard account shown on-screen as YSNLC-Student.
   - Pins YSNLC Quiz App, Student Files, and any detected Word, Excel, and PowerPoint apps.
   - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito window.
   - File Explorer is restricted to the managed user's Downloads folder.
@@ -35,18 +35,21 @@
 
 .EXAMPLE
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Diagnose
+
+.EXAMPLE
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Preflight
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Remove', 'Diagnose')]
+    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight')]
     [string]$Mode = 'Install',
 
     [ValidatePattern('^https://')]
     [string]$Url = 'https://quiz.ysnlc.com/',
 
     [ValidateLength(1, 64)]
-    [string]$DisplayName = 'YSNLC App User',
+    [string]$DisplayName = 'YSNLC-Student',
 
     [AllowEmptyString()]
     [ValidateLength(0, 64)]
@@ -68,13 +71,15 @@ $StatePath = Join-Path $Root 'State.json'
 $XmlPath = Join-Path $Root 'AssignedAccess.xml'
 $SystemRequestPath = Join-Path $Root 'SystemRequest.json'
 $SystemResultPath = Join-Path $Root 'SystemResult.json'
+$PreflightJsonPath = Join-Path $Root 'Preflight.json'
+$PreflightTextPath = Join-Path $Root 'Preflight.txt'
 $ChromePolicyBackupPath = Join-Path $Root 'ChromePolicies-BeforeKiosk.reg'
 $ChromePolicyAbsentMarker = Join-Path $Root 'ChromePolicies-WereAbsent.marker'
 $AssignedAccessBackupPath = Join-Path $Root 'AssignedAccess-BeforeKiosk.txt'
 $AssignedAccessAbsentMarker = Join-Path $Root 'AssignedAccess-WasAbsent.marker'
 $ServiceBackupPath = Join-Path $Root 'ServiceState-BeforeKiosk.json'
 $ShortcutRoot = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\YSNLC School'
-$KioskVersion = '2.0.0'
+$KioskVersion = '2.1.1'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -207,8 +212,8 @@ function Assert-SupportedEdition {
     }
 
     $buildNumber = 0
-    if (-not [int]::TryParse([string]$WindowsInfo.CurrentBuild, [ref]$buildNumber) -or $buildNumber -lt 22000) {
-        throw "This multi-app configuration requires Windows 11. Detected build: $($WindowsInfo.CurrentBuild)."
+    if (-not [int]::TryParse([string]$WindowsInfo.CurrentBuild, [ref]$buildNumber) -or $buildNumber -lt 22621) {
+        throw "This restricted multi-app configuration uses Windows 11 22H2+ StartPins and requires build 22621 or newer. Detected build: $($WindowsInfo.CurrentBuild)."
     }
 }
 
@@ -760,6 +765,7 @@ function Invoke-SystemTask {
 
 function Invoke-AssignedAccessSystemStage {
     Initialize-WorkingDirectory
+    $stageStarted = Get-Date
 
     try {
         $request = Read-JsonFile -Path $SystemRequestPath
@@ -827,7 +833,11 @@ function Invoke-AssignedAccessSystemStage {
             })
         }
     } catch {
-        $message = $_.Exception.Message
+        $message = Get-DetailedExceptionMessage -ErrorRecord $_
+        $eventSummary = Get-RecentAssignedAccessFailure -Since $stageStarted.AddSeconds(-5)
+        if (-not [string]::IsNullOrWhiteSpace([string]$eventSummary)) {
+            $message = "$message AssignedAccess detail: $eventSummary"
+        }
         try {
             Write-JsonFile -Path $SystemResultPath -InputObject ([ordered]@{
                 Success = $false
@@ -934,7 +944,9 @@ function Remove-ManagedKioskUserIfPresent {
     }
 }
 
-function Assert-NoEnabledStandardUsersRemain {
+function Get-EnabledStandardLocalUsers {
+    param([string[]]$ExcludedUserNames = @())
+
     $administratorsSid = [Security.Principal.SecurityIdentifier]'S-1-5-32-544'
     $administrators = Get-LocalGroup -SID $administratorsSid -ErrorAction Stop
     $administratorSidSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -945,7 +957,14 @@ function Assert-NoEnabledStandardUsersRemain {
         }
     }
 
-    $remaining = New-Object System.Collections.Generic.List[string]
+    $excluded = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $ExcludedUserNames) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$name)) {
+            [void]$excluded.Add([string]$name)
+        }
+    }
+
+    $remaining = New-Object System.Collections.Generic.List[object]
     foreach ($user in (Get-LocalUser -ErrorAction Stop)) {
         if (-not [bool]$user.Enabled) {
             continue
@@ -955,12 +974,24 @@ function Assert-NoEnabledStandardUsersRemain {
         if ($administratorSidSet.Contains($sidText)) {
             continue
         }
+        if ($excluded.Contains([string]$user.Name)) {
+            continue
+        }
 
-        $remaining.Add([string]$user.Name)
+        $remaining.Add([pscustomobject]@{
+            Name = [string]$user.Name
+            SID  = $sidText
+        })
     }
 
+    return @($remaining)
+}
+
+function Assert-NoEnabledStandardUsersRemain {
+    $remaining = @(Get-EnabledStandardLocalUsers)
     if ($remaining.Count -gt 0) {
-        throw ('Enabled standard local accounts would still provide a normal Windows desktop: {0}. Disable or remove those accounts, then run the installer again.' -f ($remaining -join ', '))
+        $names = @($remaining | ForEach-Object { $_.Name })
+        throw ('Enabled standard local accounts would still provide a normal Windows desktop: {0}. Disable or remove those accounts, then run the installer again.' -f ($names -join ', '))
     }
 }
 
@@ -983,22 +1014,19 @@ function Disable-ConflictingLocalUser {
         }
     }
 
-    if ($user.Name -eq $env:USERNAME) {
-        throw "Refusing to disable the administrator account currently running this script: $($user.Name)"
-    }
-
     $sidText = [string]$user.SID
-    if ($sidText -match '-500$') {
-        throw "Refusing to disable the built-in Administrator account: $($user.Name)"
-    }
-
     $administratorsSid = [Security.Principal.SecurityIdentifier]'S-1-5-32-544'
     $administrators = Get-LocalGroup -SID $administratorsSid -ErrorAction Stop
     $isAdministrator = Get-LocalGroupMember -Group $administrators -ErrorAction Stop | Where-Object {
         [string]$_.SID -eq $sidText
     }
-    if ($isAdministrator) {
-        throw "Refusing to disable local administrator account: $($user.Name)"
+
+    if ($user.Name -eq $env:USERNAME -or $sidText -match '-500$' -or $isAdministrator) {
+        Write-Log "The account '$($user.Name)' matches DisableLocalUser but is an administrator, so it will NOT be disabled. Protect all administrator accounts with strong passwords." 'WARN'
+        return [pscustomobject]@{
+            Name       = $null
+            WasEnabled = $false
+        }
     }
 
     $wasEnabled = [bool]$user.Enabled
@@ -1037,6 +1065,327 @@ function Restore-ConflictingLocalUser {
     }
 }
 
+
+function Test-HardPendingRestart {
+    $reasons = New-Object System.Collections.Generic.List[string]
+    foreach ($path in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            $reasons.Add($path)
+        }
+    }
+    return @($reasons)
+}
+
+function Test-SoftPendingRestart {
+    try {
+        $session = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction Stop
+        return ($null -ne $session.PendingFileRenameOperations -and @($session.PendingFileRenameOperations).Count -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+function Get-KnownAssignedAccessBuildWarning {
+    param([Parameter(Mandatory = $true)]$WindowsInfo)
+
+    $build = 0
+    $ubr = 0
+    if (-not [int]::TryParse([string]$WindowsInfo.CurrentBuild, [ref]$build)) {
+        return $null
+    }
+    [void][int]::TryParse([string]$WindowsInfo.UBR, [ref]$ubr)
+
+    if ($build -in @(26100, 26200) -and $ubr -ge 4484 -and $ubr -lt 7705) {
+        return "Windows build $build.$ubr is in a Microsoft-documented Assigned Access regression range. Install Windows updates until this PC is at least $build.7705, restart, and run the installer again."
+    }
+
+    return $null
+}
+
+function Enable-AssignedAccessOperationalLog {
+    try {
+        & "$env:SystemRoot\System32\wevtutil.exe" sl 'Microsoft-Windows-AssignedAccess/Operational' /e:true *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log 'Assigned Access Operational logging is enabled for this installation attempt.' 'OK'
+        } else {
+            Write-Log "Assigned Access Operational logging could not be enabled. wevtutil exit code: $LASTEXITCODE" 'WARN'
+        }
+    } catch {
+        Write-Log "Assigned Access Operational logging could not be enabled: $($_.Exception.Message)" 'WARN'
+    }
+}
+
+function Get-RecentAssignedAccessFailure {
+    param([datetime]$Since = (Get-Date).AddMinutes(-5))
+
+    try {
+        $events = @(Get-WinEvent -LogName 'Microsoft-Windows-AssignedAccess/Admin' -MaxEvents 12 -ErrorAction Stop | Where-Object {
+            $_.TimeCreated -ge $Since -and $_.LevelDisplayName -eq 'Error'
+        } | Select-Object -First 3)
+
+        if ($events.Count -eq 0) {
+            return $null
+        }
+
+        $parts = foreach ($event in $events) {
+            $message = ([string]$event.Message -replace '[\r\n]+', ' ').Trim()
+            if ($message.Length -gt 500) {
+                $message = $message.Substring(0, 500) + '...'
+            }
+            'Event {0}: {1}' -f $event.Id, $message
+        }
+        return ($parts -join ' | ')
+    } catch {
+        return $null
+    }
+}
+
+function Get-DetailedExceptionMessage {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    $message = [string]$ErrorRecord.Exception.Message
+    try {
+        $hresult = [int]$ErrorRecord.Exception.HResult
+        if ($hresult -ne 0) {
+            $hex = ('0x{0:X8}' -f ([uint32]$hresult))
+            if ($message -notmatch [regex]::Escape($hex)) {
+                $message = "$message (HRESULT $hex)"
+            }
+        }
+    } catch {
+        # Keep the original message when an HRESULT cannot be formatted.
+    }
+    return $message
+}
+
+function Invoke-KioskPreflight {
+    param([switch]$Quiet)
+
+    Initialize-WorkingDirectory
+
+    $checks = New-Object System.Collections.Generic.List[object]
+    function Add-Check {
+        param(
+            [string]$Name,
+            [ValidateSet('PASS','WARN','FAIL','INFO')][string]$Status,
+            [string]$Details
+        )
+        $checks.Add([pscustomobject]@{
+            Name = $Name
+            Status = $Status
+            Details = $Details
+        })
+    }
+
+    $windows = Get-WindowsInfo
+    try {
+        Assert-SupportedEdition -WindowsInfo $windows
+        Add-Check 'Windows edition/build' 'PASS' "$($windows.ProductName); $($windows.EditionId); $($windows.DisplayVersion); build $($windows.CurrentBuild).$($windows.UBR)"
+    } catch {
+        Add-Check 'Windows edition/build' 'FAIL' $_.Exception.Message
+    }
+
+    $knownBuildIssue = Get-KnownAssignedAccessBuildWarning -WindowsInfo $windows
+    if ($knownBuildIssue) {
+        Add-Check 'Assigned Access Windows update level' 'FAIL' $knownBuildIssue
+    } else {
+        Add-Check 'Assigned Access Windows update level' 'PASS' 'No known blocked Assigned Access regression range was detected.'
+    }
+
+    $uac = Get-RegistryDwordValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'EnableLUA'
+    if ($uac -eq 1) {
+        Add-Check 'User Account Control' 'PASS' 'UAC is enabled.'
+    } else {
+        Add-Check 'User Account Control' 'WARN' 'UAC is disabled. The installer will enable it, then stop and require one restart before kiosk configuration.'
+    }
+
+    $hardPending = @(Test-HardPendingRestart)
+    if ($hardPending.Count -gt 0) {
+        Add-Check 'Pending Windows restart' 'FAIL' 'Windows has a pending servicing/update restart. Restart this PC, then run the same installer again.'
+    } elseif (Test-SoftPendingRestart) {
+        Add-Check 'Pending Windows restart' 'WARN' 'Pending file rename operations were detected. A restart is recommended before deployment.'
+    } else {
+        Add-Check 'Pending Windows restart' 'PASS' 'No blocking pending restart was detected.'
+    }
+
+    try {
+        Get-CimClass -Namespace 'root\cimv2\mdm\dmmap' -ClassName 'MDM_AssignedAccess' -ErrorAction Stop | Out-Null
+        $instance = Get-CimInstance -Namespace 'root\cimv2\mdm\dmmap' -ClassName 'MDM_AssignedAccess' -ErrorAction Stop | Select-Object -First 1
+        if ($instance) {
+            Add-Check 'Assigned Access MDM provider' 'PASS' 'MDM_AssignedAccess is present and queryable.'
+        } else {
+            Add-Check 'Assigned Access MDM provider' 'FAIL' 'MDM_AssignedAccess exists but Windows returned no provider instance.'
+        }
+    } catch {
+        Add-Check 'Assigned Access MDM provider' 'FAIL' $_.Exception.Message
+    }
+
+    foreach ($serviceName in @('AssignedAccessManagerSvc','AppIDSvc')) {
+        $svc = Get-ServiceSnapshot -Name $serviceName
+        if (-not $svc) {
+            Add-Check "Service $serviceName" 'FAIL' 'Required Windows kiosk/AppLocker service is missing.'
+        } elseif ([string]$svc.StartMode -eq 'Disabled') {
+            Add-Check "Service $serviceName" 'WARN' "Service is disabled. The installer will enable it before applying Assigned Access. Current state: $($svc.State)."
+        } else {
+            Add-Check "Service $serviceName" 'PASS' "StartMode=$($svc.StartMode); State=$($svc.State)."
+        }
+    }
+
+    $requiredCommands = @(
+        'Get-LocalUser','Get-LocalGroup','Get-LocalGroupMember','Disable-LocalUser',
+        'New-ScheduledTaskAction','New-ScheduledTaskTrigger','New-ScheduledTaskPrincipal',
+        'New-ScheduledTaskSettingsSet','Register-ScheduledTask','Start-ScheduledTask','Unregister-ScheduledTask'
+    )
+    $missingCommands = @($requiredCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+    if ($missingCommands.Count -gt 0) {
+        Add-Check 'Required Windows PowerShell commands' 'FAIL' ('Missing: ' + ($missingCommands -join ', '))
+    } else {
+        Add-Check 'Required Windows PowerShell commands' 'PASS' 'LocalAccounts and ScheduledTasks commands are available.'
+    }
+
+    if (Test-Path -LiteralPath "$env:WINDIR\explorer.exe") {
+        Add-Check 'File Explorer' 'PASS' 'explorer.exe is present.'
+    } else {
+        Add-Check 'File Explorer' 'FAIL' 'explorer.exe is missing.'
+    }
+
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        if ($shell) {
+            Add-Check 'Windows shortcut engine' 'PASS' 'WScript.Shell COM automation is available.'
+        } else {
+            Add-Check 'Windows shortcut engine' 'FAIL' 'WScript.Shell returned no object.'
+        }
+    } catch {
+        Add-Check 'Windows shortcut engine' 'FAIL' $_.Exception.Message
+    } finally {
+        if ($shell) {
+            [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+        }
+    }
+
+    if (Test-KioskInstallEvidence) {
+        Add-Check 'Existing kiosk state' 'FAIL' "Existing or incomplete kiosk state exists under $Root. Use the removal command before reinstalling."
+    } else {
+        Add-Check 'Existing kiosk state' 'PASS' 'No previous kiosk state was detected.'
+    }
+
+    try {
+        $otherUsers = @(Get-EnabledStandardLocalUsers -ExcludedUserNames @($DisableLocalUser))
+        if ($otherUsers.Count -gt 0) {
+            $names = @($otherUsers | ForEach-Object { $_.Name })
+            Add-Check 'Other standard local users' 'FAIL' ('These enabled standard accounts would keep a normal desktop: ' + ($names -join ', '))
+        } else {
+            $configured = Get-LocalUser -Name $DisableLocalUser -ErrorAction SilentlyContinue
+            if ($configured -and $configured.Enabled) {
+                $adminSid = [Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+                $adminGroup = Get-LocalGroup -SID $adminSid -ErrorAction Stop
+                $configuredIsAdmin = Get-LocalGroupMember -Group $adminGroup -ErrorAction Stop | Where-Object {
+                    [string]$_.SID -eq [string]$configured.SID
+                }
+                if ($configuredIsAdmin) {
+                    Add-Check 'Other standard local users' 'WARN' "'$DisableLocalUser' is an administrator account, not a student standard account. It will be left enabled; make sure it has a strong password."
+                } else {
+                    Add-Check 'Other standard local users' 'PASS' "Only the configured '$DisableLocalUser' standard account needs disabling; the installer will do that reversibly."
+                }
+            } else {
+                Add-Check 'Other standard local users' 'PASS' 'No conflicting enabled standard local accounts were detected.'
+            }
+        }
+    } catch {
+        Add-Check 'Other standard local users' 'FAIL' $_.Exception.Message
+    }
+
+    $chrome = Get-ChromeExecutable
+    if ($chrome) {
+        Add-Check 'Google Chrome' 'PASS' $chrome
+    } else {
+        Add-Check 'Google Chrome' 'INFO' 'Chrome is not installed. The installer will download the official Chrome Enterprise MSI.'
+    }
+
+    $officeApps = @(Get-OfficeApps)
+    foreach ($officeName in @('Microsoft Word','Microsoft Excel','Microsoft PowerPoint')) {
+        $found = $officeApps | Where-Object Name -eq $officeName | Select-Object -First 1
+        if ($found) {
+            Add-Check $officeName 'PASS' ([string]$found.Path)
+        } else {
+            Add-Check $officeName 'INFO' 'Not installed/detected; this app will be omitted from the student Start menu.'
+        }
+    }
+
+    try {
+        $testChrome = $chrome
+        if (-not $testChrome) {
+            $testChrome = Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+        }
+        $testProfile = '{' + [Guid]::NewGuid().ToString().ToUpperInvariant() + '}'
+        $testXml = Build-AssignedAccessXml -ChromePath $testChrome -KioskUrl $Url -KioskDisplayName $DisplayName -ProfileId $testProfile -OfficeApps $officeApps
+        [xml]$parsed = $testXml
+        if ($parsed.DocumentElement.LocalName -ne 'AssignedAccessConfiguration') {
+            throw 'Generated XML root element is incorrect.'
+        }
+        Add-Check 'Generated Assigned Access XML' 'PASS' 'The generated restricted multi-app XML is well formed.'
+    } catch {
+        Add-Check 'Generated Assigned Access XML' 'FAIL' $_.Exception.Message
+    }
+
+    $chromePolicyRoot = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
+    if (Test-Path -LiteralPath $chromePolicyRoot) {
+        Add-Check 'Existing Chrome computer policy' 'WARN' 'A machine-wide Chrome policy key already exists. This script will not overwrite it; existing organization policies may still affect Administrator and student Chrome.'
+    } else {
+        Add-Check 'Existing Chrome computer policy' 'PASS' 'No existing machine-wide Chrome policy key was detected.'
+    }
+
+    $canInstall = (@($checks | Where-Object Status -eq 'FAIL').Count -eq 0)
+    $result = [pscustomobject]@{
+        Version = $KioskVersion
+        Generated = (Get-Date).ToString('o')
+        CanInstall = $canInstall
+        Checks = @($checks)
+    }
+
+    Write-JsonFile -InputObject $result -Path $PreflightJsonPath
+
+    $text = New-Object System.Collections.Generic.List[string]
+    $text.Add('YSNLC Kiosk Compatibility Preflight')
+    $text.Add(('Generated: {0}' -f (Get-Date)))
+    $text.Add(('Script version: {0}' -f $KioskVersion))
+    $text.Add('')
+    foreach ($check in $checks) {
+        $text.Add(('[{0}] {1}: {2}' -f $check.Status, $check.Name, $check.Details))
+    }
+    $text.Add('')
+    $text.Add(('RESULT: {0}' -f $(if ($canInstall) { 'READY TO INSTALL' } else { 'NOT READY' })))
+    $text | Set-Content -LiteralPath $PreflightTextPath -Encoding UTF8
+
+    if (-not $Quiet) {
+        Write-Host ''
+        Write-Host 'YSNLC Kiosk Compatibility Check' -ForegroundColor Cyan
+        foreach ($check in $checks) {
+            $color = switch ($check.Status) {
+                'PASS' { 'Green' }
+                'WARN' { 'Yellow' }
+                'FAIL' { 'Red' }
+                default { 'Gray' }
+            }
+            Write-Host ('[{0}] {1}: {2}' -f $check.Status, $check.Name, $check.Details) -ForegroundColor $color
+        }
+        Write-Host ''
+        if ($canInstall) {
+            Write-Host 'RESULT: READY TO INSTALL' -ForegroundColor Green
+        } else {
+            Write-Host 'RESULT: NOT READY - no kiosk configuration was applied.' -ForegroundColor Red
+        }
+        Write-Host "Preflight report: $PreflightTextPath" -ForegroundColor Cyan
+    }
+
+    return $result
+}
+
 function Complete-WithOptionalRestart {
     param([bool]$RestartRequired)
 
@@ -1054,8 +1403,9 @@ function Complete-WithOptionalRestart {
 }
 
 function Install-Kiosk {
-    if (Test-KioskInstallEvidence) {
-        throw 'A SchoolQuizKiosk installation or incomplete rollback is already recorded. Run this script with -Mode Remove before installing again.'
+    $preflight = Invoke-KioskPreflight -Quiet
+    if (-not [bool]$preflight.CanInstall) {
+        throw "Compatibility preflight failed. Review: $PreflightTextPath"
     }
 
     $windows = Get-WindowsInfo
@@ -1064,6 +1414,13 @@ function Install-Kiosk {
     Write-Log 'Before student use, confirm that every administrator account has a strong, nonblank password. The script cannot verify password strength.' 'WARN'
 
     $restartRequired = Enable-UacIfRequired
+    if ($restartRequired) {
+        Write-Log 'Windows preparation completed: UAC was enabled. Restart Windows and run the same installer again; no Assigned Access profile was applied.' 'WARN'
+        Write-Host ''
+        Write-Host 'RESTART REQUIRED BEFORE INSTALLATION CAN CONTINUE.' -ForegroundColor Yellow
+        Write-Host 'Restart Windows, then run the same GitHub one-line installer again.' -ForegroundColor Yellow
+        exit 10
+    }
 
     $chrome = Get-ChromeExecutable
     if (-not $chrome) {
@@ -1093,6 +1450,7 @@ function Install-Kiosk {
     try {
         Ensure-RequiredKioskServices
         $servicesChanged = $true
+        Enable-AssignedAccessOperationalLog
 
         Set-ChromeKioskPolicies -KioskUrl $Url
         Install-KioskShortcuts -ChromePath $chrome -KioskUrl $Url -OfficeApps $officeApps
@@ -1281,6 +1639,12 @@ try {
             $report = Write-DiagnosticReport
             Write-Host ''
             Write-Host "Diagnostics saved to: $report" -ForegroundColor Green
+        }
+        'Preflight' {
+            $preflight = Invoke-KioskPreflight
+            if (-not [bool]$preflight.CanInstall) {
+                exit 2
+            }
         }
     }
 } catch {

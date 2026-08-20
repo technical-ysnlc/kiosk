@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$BootstrapVersion = '1.0.2'
+$BootstrapVersion = '1.1.0'
 $ManifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPath = '/technical-ysnlc/kiosk/'
@@ -252,10 +252,40 @@ try {
     $quotedUpdater = Quote-PowerShellLiteral -Value $updaterPath
     $quotedSetupHash = Quote-PowerShellLiteral -Value $setupSha256
     $quotedUpdaterHash = Quote-PowerShellLiteral -Value $updaterSha256
+    $elevatedTranscriptPath = Join-Path $TempRoot 'elevated-install.log'
+    $quotedTranscript = Quote-PowerShellLiteral -Value $elevatedTranscriptPath
 
     $elevatedCode = @"
 `$ErrorActionPreference = 'Stop'
 `$ProgressPreference = 'SilentlyContinue'
+try { Start-Transcript -Path $quotedTranscript -Force | Out-Null } catch {}
+
+function Show-KioskFailureDetails {
+    `$root = Join-Path `$env:ProgramData 'SchoolQuizKiosk'
+    Write-Host ''
+    Write-Host '===== YSNLC FAILURE DETAILS =====' -ForegroundColor Red
+
+    `$preflight = Join-Path `$root 'Preflight.txt'
+    if (Test-Path -LiteralPath `$preflight) {
+        Write-Host '--- Compatibility preflight ---' -ForegroundColor Yellow
+        Get-Content -LiteralPath `$preflight -Tail 40 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host `$_ }
+    }
+
+    `$setupLog = Join-Path `$root 'Setup.log'
+    if (Test-Path -LiteralPath `$setupLog) {
+        Write-Host '--- Setup log (last 50 lines) ---' -ForegroundColor Yellow
+        Get-Content -LiteralPath `$setupLog -Tail 50 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host `$_ }
+    }
+
+    `$diag = Get-ChildItem -LiteralPath `$root -Filter 'Diagnostics-*.txt' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (`$diag) {
+        Write-Host "--- Latest diagnostic: `$(`$diag.FullName) ---" -ForegroundColor Yellow
+        Get-Content -LiteralPath `$diag.FullName -Tail 50 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host `$_ }
+    }
+
+    Write-Host '===== END FAILURE DETAILS =====' -ForegroundColor Red
+}
 
 function Assert-VerifiedFile {
     param([string]`$Path, [string]`$ExpectedHash)
@@ -313,10 +343,26 @@ try {
     }
 
     Write-Host ''
+    Write-Host 'Running YSNLC compatibility preflight...' -ForegroundColor Cyan
+    & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Preflight
+    if (`$LASTEXITCODE -ne 0) {
+        Show-KioskFailureDetails
+        throw 'Compatibility preflight failed. Nothing was configured. Read the NOT READY reason above.'
+    }
+
+    Write-Host ''
     Write-Host 'Installing the YSNLC restricted student experience...' -ForegroundColor Cyan
     & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Install
-    if (`$LASTEXITCODE -ne 0) {
-        throw "Kiosk setup returned exit code `$LASTEXITCODE."
+    `$setupExit = `$LASTEXITCODE
+    if (`$setupExit -eq 10) {
+        Write-Host ''
+        Write-Host 'Windows preparation completed, but one restart is required before kiosk installation.' -ForegroundColor Yellow
+        Write-Host 'Restart this PC and run the same one-line installer again.' -ForegroundColor Yellow
+        exit 0
+    }
+    if (`$setupExit -ne 0) {
+        Show-KioskFailureDetails
+        throw "Kiosk setup returned exit code `$setupExit. The detailed Windows reason is shown above."
     }
 
     try {
@@ -345,6 +391,8 @@ try {
     Write-Host "One-line kiosk installation failed: `$(`$_.Exception.Message)" -ForegroundColor Red
     Write-Host 'The computer was not scheduled to restart by this installer.' -ForegroundColor Yellow
     exit 1
+} finally {
+    try { Stop-Transcript | Out-Null } catch {}
 }
 "@
 
@@ -368,8 +416,15 @@ try {
             -PassThru
     }
 
+    if (Test-Path -LiteralPath $elevatedTranscriptPath) {
+        Write-Host ''
+        Write-Host '===== ELEVATED INSTALLER OUTPUT =====' -ForegroundColor Cyan
+        Get-Content -LiteralPath $elevatedTranscriptPath -Tail 120 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        Write-Host '===== END ELEVATED OUTPUT =====' -ForegroundColor Cyan
+    }
+
     if ($process.ExitCode -ne 0) {
-        throw "The elevated installer returned exit code $($process.ExitCode)."
+        throw "The elevated installer failed. The detailed reason is shown above. Exit code: $($process.ExitCode)."
     }
 
     Write-Host 'Bootstrap completed successfully.' -ForegroundColor Green
