@@ -7,7 +7,7 @@
   - Uses Windows Assigned Access with a classic desktop application.
   - Auto-creates and auto-signs-in a standard kiosk account.
   - Starts Chrome full-screen at https://quiz.ysnlc.com/.
-  - Restricts Chrome navigation to the configured quiz URL.
+  - Launches Chrome only for the kiosk session; website filtering is left to your hosts/network filter.
   - Runs the Assigned Access MDM Bridge portion as LocalSystem by using a temporary scheduled task.
   - Reversibly disables the pre-existing standard account named YSNLC by default, so it
     cannot remain an unrestricted route to the desktop.
@@ -15,12 +15,11 @@
 
   IMPORTANT:
   1. This script is intended for Windows 11 Pro, Enterprise, Education, or IoT Enterprise.
-  2. Chrome policies are applied at COMPUTER level, so administrator accounts should use Edge
-     for unrestricted maintenance browsing while the kiosk is installed.
+  2. This version does NOT apply computer-wide Chrome URL policies. Administrator Chrome remains unrestricted.
   3. Modified/stripped Windows images can be missing Assigned Access components. The script
      detects that condition and writes a diagnostic report instead of attempting an unsafe hack.
-  4. The URL allowlist is intentionally strict. Test the quiz on one computer first. Redirects to
-     other hosts are blocked, and file-upload questions are disabled by policy.
+  4. Website filtering is intentionally not enforced by this script. Use your hosts/network filtering
+     if students must be prevented from visiting unrelated sites. Test the quiz on one computer first.
   5. Set a strong password on every administrator account before using the kiosk.
 
 .EXAMPLE
@@ -42,7 +41,7 @@ param(
     [string]$Url = 'https://quiz.ysnlc.com/',
 
     [ValidateLength(1, 64)]
-    [string]$DisplayName = 'YSNLC Quiz App',
+    [string]$DisplayName = 'YSNLC School Quiz',
 
     [AllowEmptyString()]
     [ValidateLength(0, 64)]
@@ -68,7 +67,7 @@ $ChromePolicyBackupPath = Join-Path $Root 'ChromePolicies-BeforeKiosk.reg'
 $ChromePolicyAbsentMarker = Join-Path $Root 'ChromePolicies-WereAbsent.marker'
 $AssignedAccessBackupPath = Join-Path $Root 'AssignedAccess-BeforeKiosk.txt'
 $AssignedAccessAbsentMarker = Join-Path $Root 'AssignedAccess-WasAbsent.marker'
-$KioskVersion = '1.3.2'
+$KioskVersion = '1.4.0'
 $BreakoutSequence = 'Ctrl+Alt+Q'
 
 function Test-IsAdministrator {
@@ -361,55 +360,13 @@ function Get-AllowFilterFromUrl {
 function Set-ChromeKioskPolicies {
     param([Parameter(Mandatory = $true)][string]$KioskUrl)
 
-    Backup-ChromePolicies
-
-    $rootKey = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
-    if (-not (Test-Path -LiteralPath $rootKey)) {
-        New-Item -Path $rootKey -Force | Out-Null
-    }
-
-    # Privacy, account, and escape-surface controls.
-    $dwordPolicies = [ordered]@{
-        BrowserSignin                   = 0
-        BrowserGuestModeEnabled         = 0
-        IncognitoModeAvailability       = 2
-        SyncDisabled                    = 1
-        PasswordManagerEnabled          = 0
-        AutofillAddressEnabled           = 0
-        AutofillCreditCardEnabled        = 0
-        DeveloperToolsAvailability      = 2
-        ExtensionDeveloperModeSettings  = 1
-        PrintingEnabled                 = 0
-        DownloadRestrictions            = 3
-        DefaultBrowserSettingEnabled    = 0
-        AllowFileSelectionDialogs       = 0
-        TranslateEnabled                = 0
-        SearchSuggestEnabled            = 0
-        PromotionalTabsEnabled          = 0
-        RestoreOnStartup                = 4
-    }
-
-    foreach ($entry in $dwordPolicies.GetEnumerator()) {
-        Set-RegistryDword -Path $rootKey -Name $entry.Key -Value $entry.Value
-    }
-
-    Set-RegistryString -Path $rootKey -Name 'HomepageLocation' -Value $KioskUrl
-
-    $allowFilter = Get-AllowFilterFromUrl -InputUrl $KioskUrl
-    Set-RegistryList -ParentPath $rootKey -ListName 'URLBlocklist' -Values @(
-        '*',
-        'chrome://*',
-        'chrome-untrusted://*',
-        'devtools://*',
-        'view-source:*',
-        'file://*'
-    )
-    Set-RegistryList -ParentPath $rootKey -ListName 'URLAllowlist' -Values @($allowFilter)
-    Set-RegistryList -ParentPath $rootKey -ListName 'RestoreOnStartupURLs' -Values @($KioskUrl)
-    Set-RegistryList -ParentPath $rootKey -ListName 'ExtensionInstallBlocklist' -Values @('*')
-
-    Write-Log "Chrome machine policies now allow only: $allowFilter" 'OK'
-    Write-Log 'Chrome is forced into Incognito mode; browser sign-in, downloads, printing, file pickers, extensions, and Developer Tools are disabled.' 'OK'
+    # IMPORTANT: Do not write Chrome restrictions under HKLM here.
+    # HKLM Chrome policy applies to every Windows user, including Administrator, which caused
+    # "This page is blocked by your organization" outside the kiosk account. Assigned Access
+    # already isolates the kiosk Windows session. Website filtering should be handled by the
+    # existing hosts/network filter so administrator Chrome profiles remain unaffected.
+    Write-Log "Chrome machine-wide URL policies are not modified. Kiosk start page: $KioskUrl" 'OK'
+    Write-Log 'Student Windows access is restricted by Assigned Access; website filtering is delegated to the existing hosts/network filter.' 'OK'
 }
 
 function Restore-ChromePolicies {
@@ -448,7 +405,7 @@ function Build-AssignedAccessXml {
         [Parameter(Mandatory = $true)][string]$ProfileId
     )
 
-    $arguments = "--kiosk $KioskUrl --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --overscroll-history-navigation=0"
+    $arguments = "--kiosk $KioskUrl --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --disable-extensions --noerrdialogs --disable-pinch --overscroll-history-navigation=0"
     $escapedChromePath = [System.Security.SecurityElement]::Escape($ChromePath)
     $escapedArguments = [System.Security.SecurityElement]::Escape($arguments)
     $escapedDisplayName = [System.Security.SecurityElement]::Escape($KioskDisplayName)
@@ -838,6 +795,7 @@ function Install-Kiosk {
         Write-Log "Chrome found at: $chrome" 'OK'
     }
 
+    # Kept for backward-compatible rollback logic; v1.4+ does not create machine-wide Chrome policies.
     $policySetupStarted = $false
     $assignedAccessAttempted = $false
     $disabledUserInfo = [pscustomobject]@{
@@ -846,7 +804,6 @@ function Install-Kiosk {
     }
 
     try {
-        $policySetupStarted = $true
         Set-ChromeKioskPolicies -KioskUrl $Url
 
         $profileId = '{' + [Guid]::NewGuid().ToString().ToUpperInvariant() + '}'
@@ -865,6 +822,7 @@ function Install-Kiosk {
             ChromePath                    = $chrome
             ProfileId                     = $profileId
             BreakoutSequence              = $BreakoutSequence
+            ChromePolicyScope              = 'None-MachineWide'
             DisabledLocalUserName         = $disabledUserInfo.Name
             DisabledLocalUserWasEnabled   = $disabledUserInfo.WasEnabled
             InstalledAt                   = (Get-Date).ToString('o')
@@ -924,7 +882,7 @@ function Install-Kiosk {
     Write-Host ''
     Write-Host 'IMPORTANT: The kiosk restrictions activate after restart.' -ForegroundColor Green
     Write-Host "To leave the kiosk for maintenance, press $BreakoutSequence and sign in to the administrator account." -ForegroundColor Green
-    Write-Host 'Chrome policies are computer-wide; use Microsoft Edge for unrestricted administrator browsing.' -ForegroundColor Yellow
+    Write-Host 'Chrome URL policies are not applied machine-wide; Administrator Chrome remains unrestricted.' -ForegroundColor Green
 
     Complete-WithOptionalRestart -RestartRequired $true
 }
