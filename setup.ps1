@@ -9,7 +9,8 @@
   - Pins YSNLC Quiz App, Student Files, and any detected Word, Excel, and PowerPoint apps.
   - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito window.
   - File Explorer is restricted to the managed user's Downloads folder.
-  - Downloads and applies YSNLC wallpaper/profile branding only to the managed kiosk account.
+  - Downloads and applies YSNLC wallpaper/profile branding to the managed kiosk account.
+  - Uses the same YS-Background image for the Windows lock screen and sign-in background (device-wide).
   - Chrome website filtering is left to your existing hosts/network filter.
   - Runs the Assigned Access MDM Bridge portion as LocalSystem by using a temporary scheduled task.
   - Reversibly disables the pre-existing standard account named YSNLC by default, so it
@@ -28,6 +29,7 @@
      if students must be prevented from visiting unrelated sites. Test the complete workflow on one computer first.
   6. Set a strong password on every administrator account before using the workstation.
   7. Branding images are downloaded from this repository. Branding failure does not weaken kiosk restrictions.
+  8. Lock-screen/sign-in branding is device-wide, so the same background can also appear when an Administrator locks or signs in.
 
 .EXAMPLE
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Install -Restart
@@ -42,7 +44,7 @@
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Preflight
 
 .EXAMPLE
-  # Refresh wallpaper/profile picture on an already-installed kiosk without changing Assigned Access.
+  # Refresh wallpaper/profile picture plus lock-screen/sign-in background on an already-installed kiosk without changing Assigned Access.
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Branding
 #>
 
@@ -91,9 +93,10 @@ $BrandingWallpaperPath = Join-Path $BrandingRoot 'YS-Background.jpg'
 $BrandingProfileSourcePath = Join-Path $BrandingRoot 'YS-Profile.png'
 $BrandingTaskName = 'SchoolQuizKiosk-Branding'
 $BrandingStatePath = Join-Path $Root 'BrandingState.json'
+$BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.1.5'
+$KioskVersion = '2.1.6'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -527,6 +530,141 @@ function Install-KioskBrandingAssets {
     }
 }
 
+function Get-RegistryValueSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $snapshot = [ordered]@{
+        Path   = $Path
+        Name   = $Name
+        Exists = $false
+        Kind   = $null
+        Value  = $null
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [pscustomobject]$snapshot
+    }
+
+    try {
+        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $names = @($key.GetValueNames())
+        if ($names -contains $Name) {
+            $snapshot.Exists = $true
+            $snapshot.Kind = [string]$key.GetValueKind($Name)
+            $snapshot.Value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        }
+    } catch {
+        Write-Log "Could not snapshot registry value ${Path}\\${Name}: $($_.Exception.Message)" 'WARN'
+    }
+
+    return [pscustomobject]$snapshot
+}
+
+function Restore-RegistryValueSnapshot {
+    param([Parameter(Mandatory = $true)]$Snapshot)
+
+    $path = [string]$Snapshot.Path
+    $name = [string]$Snapshot.Name
+    if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($name)) {
+        return
+    }
+
+    if ([bool]$Snapshot.Exists) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            New-Item -Path $path -Force | Out-Null
+        }
+
+        $kind = [string]$Snapshot.Kind
+        switch ($kind) {
+            'DWord'      { New-ItemProperty -LiteralPath $path -Name $name -PropertyType DWord -Value ([int]$Snapshot.Value) -Force | Out-Null }
+            'QWord'      { New-ItemProperty -LiteralPath $path -Name $name -PropertyType QWord -Value ([long]$Snapshot.Value) -Force | Out-Null }
+            'ExpandString' { New-ItemProperty -LiteralPath $path -Name $name -PropertyType ExpandString -Value ([string]$Snapshot.Value) -Force | Out-Null }
+            'MultiString'  { New-ItemProperty -LiteralPath $path -Name $name -PropertyType MultiString -Value @($Snapshot.Value) -Force | Out-Null }
+            'Binary'       { New-ItemProperty -LiteralPath $path -Name $name -PropertyType Binary -Value ([byte[]]$Snapshot.Value) -Force | Out-Null }
+            default        { New-ItemProperty -LiteralPath $path -Name $name -PropertyType String -Value ([string]$Snapshot.Value) -Force | Out-Null }
+        }
+    } else {
+        Remove-ItemProperty -LiteralPath $path -Name $name -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Backup-DeviceBrandingSettings {
+    if (Test-Path -LiteralPath $BrandingDeviceBackupPath) {
+        return
+    }
+
+    $items = @(
+        Get-RegistryValueSnapshot -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP' -Name 'LockScreenImagePath'
+        Get-RegistryValueSnapshot -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP' -Name 'LockScreenImageUrl'
+        Get-RegistryValueSnapshot -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP' -Name 'LockScreenImageStatus'
+        Get-RegistryValueSnapshot -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization' -Name 'LockScreenImage'
+        Get-RegistryValueSnapshot -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization' -Name 'NoChangingLockScreen'
+        Get-RegistryValueSnapshot -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 'DisableAcrylicBackgroundOnLogon'
+    )
+
+    Write-JsonFile -InputObject ([ordered]@{
+        CapturedAt = (Get-Date).ToString('o')
+        Values     = $items
+    }) -Path $BrandingDeviceBackupPath
+}
+
+function Set-DeviceLockAndSignInBranding {
+    if (-not (Test-Path -LiteralPath $BrandingWallpaperPath)) {
+        throw "Kiosk lock-screen image is missing: $BrandingWallpaperPath"
+    }
+
+    Backup-DeviceBrandingSettings
+
+    # Windows uses a device-level lock/logon background. These settings are intentionally
+    # machine-wide; the kiosk desktop wallpaper remains per-user. The PersonalizationCSP
+    # values are retained as a compatibility path for Windows Pro/custom images where the
+    # local GPO-backed setting may be ignored by the edition.
+    $cspPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP'
+    if (-not (Test-Path -LiteralPath $cspPath)) {
+        New-Item -Path $cspPath -Force | Out-Null
+    }
+    New-ItemProperty -LiteralPath $cspPath -Name 'LockScreenImagePath' -PropertyType String -Value $BrandingWallpaperPath -Force | Out-Null
+    New-ItemProperty -LiteralPath $cspPath -Name 'LockScreenImageUrl' -PropertyType String -Value $BrandingWallpaperPath -Force | Out-Null
+    New-ItemProperty -LiteralPath $cspPath -Name 'LockScreenImageStatus' -PropertyType DWord -Value 1 -Force | Out-Null
+
+    $personalizationPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
+    if (-not (Test-Path -LiteralPath $personalizationPolicy)) {
+        New-Item -Path $personalizationPolicy -Force | Out-Null
+    }
+    New-ItemProperty -LiteralPath $personalizationPolicy -Name 'LockScreenImage' -PropertyType String -Value $BrandingWallpaperPath -Force | Out-Null
+    New-ItemProperty -LiteralPath $personalizationPolicy -Name 'NoChangingLockScreen' -PropertyType DWord -Value 1 -Force | Out-Null
+
+    # Keep the sign-in image clear instead of Windows blurring the lock-screen picture.
+    $logonPolicy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+    if (-not (Test-Path -LiteralPath $logonPolicy)) {
+        New-Item -Path $logonPolicy -Force | Out-Null
+    }
+    New-ItemProperty -LiteralPath $logonPolicy -Name 'DisableAcrylicBackgroundOnLogon' -PropertyType DWord -Value 1 -Force | Out-Null
+
+    Write-Log 'Applied YSNLC lock-screen/sign-in background. This branding is device-wide by Windows design.' 'OK'
+}
+
+function Restore-DeviceLockAndSignInBranding {
+    if (-not (Test-Path -LiteralPath $BrandingDeviceBackupPath)) {
+        return
+    }
+
+    try {
+        $backup = Read-JsonFile -Path $BrandingDeviceBackupPath
+        foreach ($item in @($backup.Values)) {
+            Restore-RegistryValueSnapshot -Snapshot $item
+        }
+        Write-Log 'Restored the pre-kiosk lock-screen/sign-in branding settings.' 'OK'
+    } catch {
+        Write-Log "Could not fully restore the previous device lock-screen/sign-in branding settings: $($_.Exception.Message)" 'WARN'
+    } finally {
+        Remove-Item -LiteralPath $BrandingDeviceBackupPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-ManagedKioskUser {
     param([string]$ExpectedDisplayName)
 
@@ -731,6 +869,12 @@ function Apply-KioskBranding {
         throw 'Kiosk branding files are missing.'
     }
 
+    try {
+        Set-DeviceLockAndSignInBranding
+    } catch {
+        Write-Log "Lock-screen/sign-in branding could not be applied; kiosk restrictions and per-user branding will continue. $($_.Exception.Message)" 'WARN'
+    }
+
     $user = Wait-ManagedKioskUser -ExpectedDisplayName $ExpectedDisplayName -TimeoutSeconds $(if ($AllowDeferred) { 30 } else { 5 })
     if (-not $user) {
         if ($AllowDeferred) {
@@ -767,7 +911,7 @@ function Register-KioskBrandingTask {
     $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     Register-ScheduledTask -TaskName $BrandingTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-    Write-Log 'Registered kiosk-only wallpaper/profile branding task.' 'OK'
+    Write-Log 'Registered kiosk wallpaper/profile plus lock-screen/sign-in branding task.' 'OK'
 }
 
 function Update-ExistingKioskBranding {
@@ -804,6 +948,9 @@ function Update-ExistingKioskBranding {
         DisplayName          = $effectiveDisplayName
         WallpaperUrl         = $BrandingWallpaperUrl
         ProfileUrl           = $BrandingProfileUrl
+        LockScreenImage      = $BrandingWallpaperPath
+        SignInBackground     = $BrandingWallpaperPath
+        LockAndSignInScope   = 'DeviceWide'
         AppliedImmediately   = $appliedNow
         UpdatedAt            = (Get-Date).ToString('o')
         AssignedAccessChanged = $false
@@ -812,9 +959,12 @@ function Update-ExistingKioskBranding {
 
     Write-Host ''
     Write-Host 'YSNLC kiosk branding refresh completed.' -ForegroundColor Green
+    Write-Host 'The YS-Background image is also configured for the Windows lock screen and sign-in background.' -ForegroundColor Green
+    Write-Host 'Note: Windows lock-screen/sign-in branding is device-wide and can also appear for Administrator sign-in/lock.' -ForegroundColor Yellow
     Write-Host 'Assigned Access, allowed apps, Chrome configuration, and the Administrator account were not changed.' -ForegroundColor Green
     if ($appliedNow) {
         Write-Host 'Wallpaper and profile picture were written to the managed kiosk account.' -ForegroundColor Green
+        Write-Host 'Lock-screen/sign-in background settings were refreshed for the device.' -ForegroundColor Green
         Write-Host 'If the kiosk user is currently signed in, sign out/in or restart Windows to refresh the visible wallpaper/account photo.' -ForegroundColor Yellow
     } else {
         Write-Host 'The managed kiosk account is not materialized yet. Branding will apply automatically at its next sign-in.' -ForegroundColor Yellow
@@ -825,6 +975,7 @@ function Remove-KioskBranding {
     param([string]$ExpectedDisplayName = $DisplayName)
 
     Unregister-ScheduledTask -TaskName $BrandingTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Restore-DeviceLockAndSignInBranding
 
     $user = Get-ManagedKioskUser -ExpectedDisplayName $ExpectedDisplayName
     if ($user) {
@@ -837,7 +988,7 @@ function Remove-KioskBranding {
         Remove-Item -LiteralPath $BrandingRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $BrandingStatePath -Force -ErrorAction SilentlyContinue
-    Write-Log 'Removed YSNLC kiosk branding assets/task.' 'OK'
+    Write-Log 'Removed YSNLC kiosk branding assets/task and restored prior device lock-screen/sign-in settings when a backup was available.' 'OK'
 }
 
 function Get-ServiceSnapshot {
@@ -1766,7 +1917,7 @@ function Invoke-KioskPreflight {
         Add-Check 'Generated Assigned Access XML' 'FAIL' $_.Exception.Message
     }
 
-    Add-Check 'YSNLC kiosk branding' 'INFO' ("Wallpaper: {0}; profile image: {1}. These are downloaded during installation and applied only to the managed kiosk account." -f $BrandingWallpaperUrl, $BrandingProfileUrl)
+    Add-Check 'YSNLC kiosk branding' 'INFO' ("Wallpaper: {0}; profile image: {1}. Desktop wallpaper/profile picture are kiosk-user only; the same wallpaper is also requested for the device lock screen/sign-in background." -f $BrandingWallpaperUrl, $BrandingProfileUrl)
 
     $chromePolicyRoot = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
     if (Test-Path -LiteralPath $chromePolicyRoot) {
@@ -1927,6 +2078,7 @@ function Install-Kiosk {
             BrandingWallpaperUrl        = $BrandingWallpaperUrl
             BrandingProfileUrl          = $BrandingProfileUrl
             BrandingRoot                = $BrandingRoot
+            BrandingLockScreenScope     = 'DeviceWide'
             DisabledLocalUserName       = $disabledUserInfo.Name
             DisabledLocalUserWasEnabled = $disabledUserInfo.WasEnabled
             InstalledAt                 = (Get-Date).ToString('o')
@@ -2002,6 +2154,7 @@ function Install-Kiosk {
     Write-Host 'IMPORTANT: Restart Windows to activate the restricted student account.' -ForegroundColor Green
     Write-Host 'Student Start menu: YSNLC Quiz App, Student Files, plus detected Word/Excel/PowerPoint.' -ForegroundColor Green
     Write-Host 'Student File Explorer access is restricted to Downloads.' -ForegroundColor Green
+    Write-Host 'YS-Background is also requested as the device lock-screen/sign-in background.' -ForegroundColor Green
     Write-Host 'YSNLC-Student wallpaper/profile branding is configured from the GitHub PNG files.' -ForegroundColor Green
     Write-Host 'Chrome URL policies are not applied machine-wide; Administrator Chrome remains unrestricted.' -ForegroundColor Green
     Write-Host 'For administrator maintenance, press Ctrl+Alt+Del, sign out of the student account, then sign in as Administrator.' -ForegroundColor Yellow
