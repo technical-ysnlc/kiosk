@@ -9,6 +9,7 @@
   - Pins YSNLC Quiz App, Student Files, and any detected Word, Excel, and PowerPoint apps.
   - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito window.
   - File Explorer is restricted to the managed user's Downloads folder.
+  - Downloads and applies YSNLC wallpaper/profile branding only to the managed kiosk account.
   - Chrome website filtering is left to your existing hosts/network filter.
   - Runs the Assigned Access MDM Bridge portion as LocalSystem by using a temporary scheduled task.
   - Reversibly disables the pre-existing standard account named YSNLC by default, so it
@@ -26,6 +27,7 @@
   5. Website filtering is intentionally not enforced by this script. Use your hosts/network filtering
      if students must be prevented from visiting unrelated sites. Test the complete workflow on one computer first.
   6. Set a strong password on every administrator account before using the workstation.
+  7. Branding images are downloaded from this repository. Branding failure does not weaken kiosk restrictions.
 
 .EXAMPLE
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Install -Restart
@@ -38,11 +40,15 @@
 
 .EXAMPLE
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Preflight
+
+.EXAMPLE
+  # Refresh wallpaper/profile picture on an already-installed kiosk without changing Assigned Access.
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Branding
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight')]
+    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding')]
     [string]$Mode = 'Install',
 
     [ValidatePattern('^https://')]
@@ -79,7 +85,15 @@ $AssignedAccessBackupPath = Join-Path $Root 'AssignedAccess-BeforeKiosk.txt'
 $AssignedAccessAbsentMarker = Join-Path $Root 'AssignedAccess-WasAbsent.marker'
 $ServiceBackupPath = Join-Path $Root 'ServiceState-BeforeKiosk.json'
 $ShortcutRoot = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\YSNLC School'
-$KioskVersion = '2.1.3'
+$BrandingRoot = Join-Path $env:ProgramData 'YSNLC-Kiosk-Branding'
+$BrandingWallpaperSourcePath = Join-Path $BrandingRoot 'YS-Background.png'
+$BrandingWallpaperPath = Join-Path $BrandingRoot 'YS-Background.jpg'
+$BrandingProfileSourcePath = Join-Path $BrandingRoot 'YS-Profile.png'
+$BrandingTaskName = 'SchoolQuizKiosk-Branding'
+$BrandingStatePath = Join-Path $Root 'BrandingState.json'
+$BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
+$BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
+$KioskVersion = '2.1.5'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -407,6 +421,423 @@ function Remove-KioskShortcuts {
         Remove-Item -LiteralPath $ShortcutRoot -Recurse -Force -ErrorAction Stop
         Write-Log 'Removed YSNLC restricted-user Start shortcuts.' 'OK'
     }
+}
+
+
+function Test-ValidImageFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $false
+    }
+
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $image = [System.Drawing.Image]::FromFile($Path)
+        try {
+            return ($image.Width -gt 0 -and $image.Height -gt 0)
+        } finally {
+            $image.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Convert-BrandingWallpaperToJpeg {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    $source = [System.Drawing.Image]::FromFile($SourcePath)
+    try {
+        $bitmap = New-Object -TypeName System.Drawing.Bitmap -ArgumentList @($source.Width, $source.Height)
+        try {
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+                $graphics.DrawImage($source, 0, 0, $source.Width, $source.Height)
+            } finally {
+                $graphics.Dispose()
+            }
+            $bitmap.Save($DestinationPath, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+        } finally {
+            $bitmap.Dispose()
+        }
+    } finally {
+        $source.Dispose()
+    }
+}
+
+function Install-KioskBrandingAssets {
+    # Refresh branding transactionally: validate all newly downloaded images before replacing
+    # any working branding files. A temporary network/GitHub failure therefore leaves the
+    # currently installed wallpaper/profile image intact.
+    if (-not (Test-Path -LiteralPath $BrandingRoot)) {
+        New-Item -ItemType Directory -Path $BrandingRoot -Force | Out-Null
+    }
+
+    $token = [Guid]::NewGuid().ToString('N')
+    $backgroundTemp = Join-Path $Root ("YS-Background-$token.download")
+    $profileTemp = Join-Path $Root ("YS-Profile-$token.download")
+    $wallpaperJpegTemp = Join-Path $Root ("YS-Background-$token.jpg")
+
+    Remove-Item -LiteralPath $backgroundTemp, $profileTemp, $wallpaperJpegTemp -Force -ErrorAction SilentlyContinue
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $BrandingWallpaperUrl -OutFile $backgroundTemp -UseBasicParsing -ErrorAction Stop
+        Invoke-WebRequest -Uri $BrandingProfileUrl -OutFile $profileTemp -UseBasicParsing -ErrorAction Stop
+
+        if (-not (Test-ValidImageFile -Path $backgroundTemp)) {
+            throw "Downloaded wallpaper is not a valid image: $BrandingWallpaperUrl"
+        }
+        if (-not (Test-ValidImageFile -Path $profileTemp)) {
+            throw "Downloaded profile picture is not a valid image: $BrandingProfileUrl"
+        }
+
+        Convert-BrandingWallpaperToJpeg -SourcePath $backgroundTemp -DestinationPath $wallpaperJpegTemp
+        if (-not (Test-ValidImageFile -Path $wallpaperJpegTemp)) {
+            throw 'The downloaded wallpaper could not be converted to a valid JPEG.'
+        }
+
+        # Only replace the active files after every new file has been downloaded and validated.
+        Copy-Item -LiteralPath $backgroundTemp -Destination $BrandingWallpaperSourcePath -Force
+        Copy-Item -LiteralPath $profileTemp -Destination $BrandingProfileSourcePath -Force
+        Copy-Item -LiteralPath $wallpaperJpegTemp -Destination $BrandingWallpaperPath -Force
+
+        # The kiosk account needs read access to the wallpaper/profile files, but never to the
+        # protected SchoolQuizKiosk script/request folder.
+        & "$env:SystemRoot\System32\icacls.exe" $BrandingRoot `
+            '/inheritance:r' `
+            '/grant:r' `
+            '*S-1-5-18:(OI)(CI)F' `
+            '*S-1-5-32-544:(OI)(CI)F' `
+            '*S-1-5-32-545:(OI)(CI)RX' *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not secure the kiosk branding folder: $BrandingRoot"
+        }
+
+        Write-Log "Refreshed kiosk wallpaper from: $BrandingWallpaperUrl" 'OK'
+        Write-Log "Refreshed kiosk profile image from: $BrandingProfileUrl" 'OK'
+        return $true
+    } finally {
+        Remove-Item -LiteralPath $backgroundTemp, $profileTemp, $wallpaperJpegTemp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-ManagedKioskUser {
+    param([string]$ExpectedDisplayName)
+
+    $users = @(Get-LocalUser -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -like 'kioskUser*' -and (
+            [string]::IsNullOrWhiteSpace($ExpectedDisplayName) -or
+            [string]$_.FullName -eq $ExpectedDisplayName
+        )
+    })
+
+    return ($users | Select-Object -First 1)
+}
+
+function Wait-ManagedKioskUser {
+    param(
+        [string]$ExpectedDisplayName,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $user = Get-ManagedKioskUser -ExpectedDisplayName $ExpectedDisplayName
+        if ($user) {
+            return $user
+        }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+
+    return $null
+}
+
+function Get-OrCreateKioskProfilePath {
+    param([Parameter(Mandatory = $true)]$User)
+
+    $sid = [string]$User.SID
+    $existing = Get-CimInstance Win32_UserProfile -Filter ("SID='{0}'" -f $sid.Replace("'", "''")) -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($existing -and -not [string]::IsNullOrWhiteSpace([string]$existing.LocalPath)) {
+        return [string]$existing.LocalPath
+    }
+
+    if (-not ('YSNLC.UserProfileNative' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+namespace YSNLC {
+    public static class UserProfileNative {
+        [DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern int CreateProfile(
+            string pszUserSid,
+            string pszUserName,
+            StringBuilder pszProfilePath,
+            uint cchProfilePath);
+    }
+}
+'@ -ErrorAction Stop
+    }
+
+    $buffer = New-Object System.Text.StringBuilder 1024
+    $hr = [YSNLC.UserProfileNative]::CreateProfile($sid, [string]$User.Name, $buffer, [uint32]$buffer.Capacity)
+
+    $existing = Get-CimInstance Win32_UserProfile -Filter ("SID='{0}'" -f $sid.Replace("'", "''")) -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($existing -and -not [string]::IsNullOrWhiteSpace([string]$existing.LocalPath)) {
+        return [string]$existing.LocalPath
+    }
+    if ($hr -eq 0 -and -not [string]::IsNullOrWhiteSpace($buffer.ToString())) {
+        return $buffer.ToString()
+    }
+
+    $exception = [Runtime.InteropServices.Marshal]::GetExceptionForHR($hr)
+    $hrUnsigned = [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes([int]$hr), 0)
+    throw "Could not create the managed kiosk user profile. HRESULT=0x{0:X8}; {1}" -f $hrUnsigned, $exception.Message
+}
+
+function Invoke-WithKioskUserHive {
+    param(
+        [Parameter(Mandatory = $true)]$User,
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock
+    )
+
+    $sid = [string]$User.SID
+    $loadedRoot = "Registry::HKEY_USERS\$sid"
+    if (Test-Path -LiteralPath $loadedRoot) {
+        & $ScriptBlock $loadedRoot
+        return
+    }
+
+    $profilePath = Get-OrCreateKioskProfilePath -User $User
+    $hivePath = Join-Path $profilePath 'NTUSER.DAT'
+    if (-not (Test-Path -LiteralPath $hivePath)) {
+        throw "The managed kiosk profile hive was not found: $hivePath"
+    }
+
+    $mountName = 'YSNLC_KioskBranding_' + [Guid]::NewGuid().ToString('N')
+    & "$env:SystemRoot\System32\reg.exe" load "HKU\$mountName" $hivePath *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not load the managed kiosk profile hive: $hivePath"
+    }
+
+    try {
+        & $ScriptBlock "Registry::HKEY_USERS\$mountName"
+    } finally {
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+        & "$env:SystemRoot\System32\reg.exe" unload "HKU\$mountName" *> $null
+    }
+}
+
+function Set-KioskWallpaperForUser {
+    param([Parameter(Mandatory = $true)]$User)
+
+    if (-not (Test-Path -LiteralPath $BrandingWallpaperPath)) {
+        throw "Kiosk wallpaper file is missing: $BrandingWallpaperPath"
+    }
+
+    Invoke-WithKioskUserHive -User $User -ScriptBlock {
+        param($HiveRoot)
+
+        $desktopKey = Join-Path $HiveRoot 'Control Panel\Desktop'
+        if (-not (Test-Path -LiteralPath $desktopKey)) {
+            New-Item -Path $desktopKey -Force | Out-Null
+        }
+        New-ItemProperty -LiteralPath $desktopKey -Name 'Wallpaper' -PropertyType String -Value $BrandingWallpaperPath -Force | Out-Null
+        New-ItemProperty -LiteralPath $desktopKey -Name 'WallpaperStyle' -PropertyType String -Value '10' -Force | Out-Null
+        New-ItemProperty -LiteralPath $desktopKey -Name 'TileWallpaper' -PropertyType String -Value '0' -Force | Out-Null
+
+        $activeDesktopKey = Join-Path $HiveRoot 'Software\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop'
+        if (-not (Test-Path -LiteralPath $activeDesktopKey)) {
+            New-Item -Path $activeDesktopKey -Force | Out-Null
+        }
+        New-ItemProperty -LiteralPath $activeDesktopKey -Name 'NoChangingWallPaper' -PropertyType DWord -Value 1 -Force | Out-Null
+    }
+}
+
+function Set-KioskAccountPictureForUser {
+    param([Parameter(Mandatory = $true)]$User)
+
+    if (-not (Test-Path -LiteralPath $BrandingProfileSourcePath)) {
+        throw "Kiosk profile image is missing: $BrandingProfileSourcePath"
+    }
+
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    $sid = [string]$User.SID
+    $pictureRoot = Join-Path $BrandingRoot ('AccountPicture-' + ($sid -replace '[^A-Za-z0-9-]', '_'))
+    if (Test-Path -LiteralPath $pictureRoot) {
+        Remove-Item -LiteralPath $pictureRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $pictureRoot -Force | Out-Null
+
+    $source = [System.Drawing.Image]::FromFile($BrandingProfileSourcePath)
+    try {
+        foreach ($size in @(32, 40, 48, 96, 192, 200, 240, 448)) {
+            $bitmap = New-Object -TypeName System.Drawing.Bitmap -ArgumentList @($size, $size)
+            try {
+                $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+                try {
+                    $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+                    $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+
+                    $scale = [Math]::Max($size / [double]$source.Width, $size / [double]$source.Height)
+                    $drawWidth = [int][Math]::Ceiling($source.Width * $scale)
+                    $drawHeight = [int][Math]::Ceiling($source.Height * $scale)
+                    $x = [int](($size - $drawWidth) / 2)
+                    $y = [int](($size - $drawHeight) / 2)
+                    $graphics.DrawImage($source, $x, $y, $drawWidth, $drawHeight)
+                } finally {
+                    $graphics.Dispose()
+                }
+
+                $imagePath = Join-Path $pictureRoot ("Image{0}.png" -f $size)
+                $bitmap.Save($imagePath, [System.Drawing.Imaging.ImageFormat]::Png)
+            } finally {
+                $bitmap.Dispose()
+            }
+        }
+    } finally {
+        $source.Dispose()
+    }
+
+    $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AccountPicture\Users\$sid"
+    if (-not (Test-Path -LiteralPath $regPath)) {
+        New-Item -Path $regPath -Force | Out-Null
+    }
+    foreach ($size in @(32, 40, 48, 96, 192, 200, 240, 448)) {
+        $imagePath = Join-Path $pictureRoot ("Image{0}.png" -f $size)
+        New-ItemProperty -LiteralPath $regPath -Name ("Image{0}" -f $size) -PropertyType String -Value $imagePath -Force | Out-Null
+    }
+}
+
+function Apply-KioskBranding {
+    param(
+        [string]$ExpectedDisplayName = $DisplayName,
+        [switch]$AllowDeferred
+    )
+
+    if (-not (Test-Path -LiteralPath $BrandingWallpaperPath) -or -not (Test-Path -LiteralPath $BrandingProfileSourcePath)) {
+        if ($AllowDeferred) {
+            Write-Log 'Kiosk branding files are not present; branding was skipped without changing kiosk restrictions.' 'WARN'
+            return $false
+        }
+        throw 'Kiosk branding files are missing.'
+    }
+
+    $user = Wait-ManagedKioskUser -ExpectedDisplayName $ExpectedDisplayName -TimeoutSeconds $(if ($AllowDeferred) { 30 } else { 5 })
+    if (-not $user) {
+        if ($AllowDeferred) {
+            Write-Log "Managed kiosk account '$ExpectedDisplayName' is not available yet. Wallpaper/profile branding will be applied automatically at kiosk logon." 'WARN'
+            return $false
+        }
+        return $false
+    }
+
+    Set-KioskWallpaperForUser -User $user
+    Set-KioskAccountPictureForUser -User $user
+    Write-Log "Applied wallpaper and account picture to managed kiosk user $($user.Name) ($ExpectedDisplayName)." 'OK'
+    return $true
+}
+
+function Register-KioskBrandingTask {
+    param([string]$ExpectedDisplayName = $DisplayName)
+
+    Copy-ScriptToProgramData
+    $powerShellPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $escapedDisplayName = $ExpectedDisplayName.Replace('"', '\"')
+    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode ApplyBranding -DisplayName "{1}"' -f $InstalledScript, $escapedDisplayName
+    $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments
+
+    $managedUser = Get-ManagedKioskUser -ExpectedDisplayName $ExpectedDisplayName
+    if ($managedUser) {
+        $trigger = New-ScheduledTaskTrigger -AtLogOn -User ("{0}\{1}" -f $env:COMPUTERNAME, $managedUser.Name)
+    } else {
+        # If Windows has not materialized the AutoLogonAccount yet, use an any-user trigger.
+        # Apply-KioskBranding only touches the account whose FullName matches YSNLC-Student.
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+    }
+
+    $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName $BrandingTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    Write-Log 'Registered kiosk-only wallpaper/profile branding task.' 'OK'
+}
+
+function Update-ExistingKioskBranding {
+    param([string]$RequestedDisplayName = $DisplayName)
+
+    $effectiveDisplayName = $RequestedDisplayName
+    $hasKioskState = Test-Path -LiteralPath $StatePath
+    if ($hasKioskState) {
+        try {
+            $state = Read-JsonFile -Path $StatePath
+            if ($state.DisplayName -and -not [string]::IsNullOrWhiteSpace([string]$state.DisplayName)) {
+                $effectiveDisplayName = [string]$state.DisplayName
+            }
+        } catch {
+            Write-Log "Existing kiosk state could not be read while resolving the branding account. $($_.Exception.Message)" 'WARN'
+        }
+    }
+
+    $managedUser = Get-ManagedKioskUser -ExpectedDisplayName $effectiveDisplayName
+    if (-not $hasKioskState -and -not $managedUser) {
+        throw 'No installed YSNLC kiosk was detected. Use -Mode Install on a new computer instead of -Mode Branding.'
+    }
+
+    Write-Log "Refreshing kiosk-only branding for display name '$effectiveDisplayName'. Assigned Access will not be reconfigured." 'INFO'
+    [void](Install-KioskBrandingAssets)
+
+    # Registering the task also copies this latest verified setup script into ProgramData. This
+    # means a kiosk originally installed by an older 2.x release can gain/update branding safely.
+    Register-KioskBrandingTask -ExpectedDisplayName $effectiveDisplayName
+    $appliedNow = [bool](Apply-KioskBranding -ExpectedDisplayName $effectiveDisplayName -AllowDeferred)
+
+    $brandingState = [ordered]@{
+        BrandingVersion      = $KioskVersion
+        DisplayName          = $effectiveDisplayName
+        WallpaperUrl         = $BrandingWallpaperUrl
+        ProfileUrl           = $BrandingProfileUrl
+        AppliedImmediately   = $appliedNow
+        UpdatedAt            = (Get-Date).ToString('o')
+        AssignedAccessChanged = $false
+    }
+    Write-JsonFile -InputObject $brandingState -Path $BrandingStatePath
+
+    Write-Host ''
+    Write-Host 'YSNLC kiosk branding refresh completed.' -ForegroundColor Green
+    Write-Host 'Assigned Access, allowed apps, Chrome configuration, and the Administrator account were not changed.' -ForegroundColor Green
+    if ($appliedNow) {
+        Write-Host 'Wallpaper and profile picture were written to the managed kiosk account.' -ForegroundColor Green
+        Write-Host 'If the kiosk user is currently signed in, sign out/in or restart Windows to refresh the visible wallpaper/account photo.' -ForegroundColor Yellow
+    } else {
+        Write-Host 'The managed kiosk account is not materialized yet. Branding will apply automatically at its next sign-in.' -ForegroundColor Yellow
+    }
+}
+
+function Remove-KioskBranding {
+    param([string]$ExpectedDisplayName = $DisplayName)
+
+    Unregister-ScheduledTask -TaskName $BrandingTaskName -Confirm:$false -ErrorAction SilentlyContinue
+
+    $user = Get-ManagedKioskUser -ExpectedDisplayName $ExpectedDisplayName
+    if ($user) {
+        $sid = [string]$user.SID
+        $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AccountPicture\Users\$sid"
+        Remove-Item -LiteralPath $regPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if (Test-Path -LiteralPath $BrandingRoot) {
+        Remove-Item -LiteralPath $BrandingRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -LiteralPath $BrandingStatePath -Force -ErrorAction SilentlyContinue
+    Write-Log 'Removed YSNLC kiosk branding assets/task.' 'OK'
 }
 
 function Get-ServiceSnapshot {
@@ -1335,6 +1766,8 @@ function Invoke-KioskPreflight {
         Add-Check 'Generated Assigned Access XML' 'FAIL' $_.Exception.Message
     }
 
+    Add-Check 'YSNLC kiosk branding' 'INFO' ("Wallpaper: {0}; profile image: {1}. These are downloaded during installation and applied only to the managed kiosk account." -f $BrandingWallpaperUrl, $BrandingProfileUrl)
+
     $chromePolicyRoot = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
     if (Test-Path -LiteralPath $chromePolicyRoot) {
         Add-Check 'Existing Chrome computer policy' 'WARN' 'A machine-wide Chrome policy key already exists. This script will not overwrite it; existing organization policies may still affect Administrator and student Chrome.'
@@ -1444,6 +1877,7 @@ function Install-Kiosk {
     $assignedAccessAttempted = $false
     $shortcutsCreated = $false
     $servicesChanged = $false
+    $brandingAssetsInstalled = $false
     $disabledUserInfo = [pscustomobject]@{
         Name       = $null
         WasEnabled = $false
@@ -1457,6 +1891,13 @@ function Install-Kiosk {
         Set-ChromeKioskPolicies -KioskUrl $Url
         Install-KioskShortcuts -ChromePath $chrome -KioskUrl $Url -OfficeApps $officeApps
         $shortcutsCreated = $true
+
+        try {
+            $brandingAssetsInstalled = Install-KioskBrandingAssets
+        } catch {
+            $brandingAssetsInstalled = $false
+            Write-Log "Kiosk branding assets could not be prepared; kiosk restrictions will continue without custom wallpaper/profile image. $($_.Exception.Message)" 'WARN'
+        }
 
         $profileId = '{' + [Guid]::NewGuid().ToString().ToUpperInvariant() + '}'
         $xml = Build-AssignedAccessXml `
@@ -1483,6 +1924,9 @@ function Install-Kiosk {
             ProfileId                   = $profileId
             ChromePolicyScope           = 'None-MachineWide'
             ShortcutRoot                = $ShortcutRoot
+            BrandingWallpaperUrl        = $BrandingWallpaperUrl
+            BrandingProfileUrl          = $BrandingProfileUrl
+            BrandingRoot                = $BrandingRoot
             DisabledLocalUserName       = $disabledUserInfo.Name
             DisabledLocalUserWasEnabled = $disabledUserInfo.WasEnabled
             InstalledAt                 = (Get-Date).ToString('o')
@@ -1491,6 +1935,15 @@ function Install-Kiosk {
 
         $assignedAccessAttempted = $true
         Invoke-SystemTask -SystemMode Install
+
+        if ($brandingAssetsInstalled) {
+            try {
+                Register-KioskBrandingTask -ExpectedDisplayName $DisplayName
+                [void](Apply-KioskBranding -ExpectedDisplayName $DisplayName -AllowDeferred)
+            } catch {
+                Write-Log "Assigned Access installed, but kiosk branding could not be fully applied yet. The kiosk remains restricted. $($_.Exception.Message)" 'WARN'
+            }
+        }
     } catch {
         $applyError = $_.Exception.Message
         Write-Log 'Restricted student experience setup failed. Attempting a safe rollback.' 'WARN'
@@ -1517,12 +1970,15 @@ function Install-Kiosk {
                 Write-Log "The original local account could not be restored: $($_.Exception.Message)" 'WARN'
             }
 
+            if ($brandingAssetsInstalled -or (Test-Path -LiteralPath $BrandingRoot)) {
+                try { Remove-KioskBranding -ExpectedDisplayName $DisplayName } catch { Write-Log "Branding rollback failed: $($_.Exception.Message)" 'WARN' }
+            }
+
             try {
                 Remove-ManagedKioskUserIfPresent -ExpectedDisplayName $DisplayName
             } catch {
                 Write-Log "Managed kiosk-user rollback failed: $($_.Exception.Message)" 'WARN'
             }
-
             if ($shortcutsCreated) {
                 try { Remove-KioskShortcuts } catch { Write-Log "Shortcut rollback failed: $($_.Exception.Message)" 'WARN' }
             }
@@ -1546,6 +2002,7 @@ function Install-Kiosk {
     Write-Host 'IMPORTANT: Restart Windows to activate the restricted student account.' -ForegroundColor Green
     Write-Host 'Student Start menu: YSNLC Quiz App, Student Files, plus detected Word/Excel/PowerPoint.' -ForegroundColor Green
     Write-Host 'Student File Explorer access is restricted to Downloads.' -ForegroundColor Green
+    Write-Host 'YSNLC-Student wallpaper/profile branding is configured from the GitHub PNG files.' -ForegroundColor Green
     Write-Host 'Chrome URL policies are not applied machine-wide; Administrator Chrome remains unrestricted.' -ForegroundColor Green
     Write-Host 'For administrator maintenance, press Ctrl+Alt+Del, sign out of the student account, then sign in as Administrator.' -ForegroundColor Yellow
 
@@ -1599,6 +2056,12 @@ function Remove-Kiosk {
         }
     }
 
+    try {
+        Remove-KioskBranding -ExpectedDisplayName $display
+    } catch {
+        Write-Log "Kiosk branding cleanup could not be completed: $($_.Exception.Message)" 'WARN'
+    }
+
     Remove-ManagedKioskUserIfPresent -ExpectedDisplayName $display
     try {
         Restore-RequiredKioskServices
@@ -1647,6 +2110,14 @@ try {
             if (-not [bool]$preflight.CanInstall) {
                 exit 2
             }
+        }
+        'Branding' {
+            Update-ExistingKioskBranding -RequestedDisplayName $DisplayName
+        }
+        'ApplyBranding' {
+            # Internal scheduled-task mode: use already-downloaded local assets only. Do not
+            # require GitHub/network access every time the kiosk user signs in.
+            [void](Apply-KioskBranding -ExpectedDisplayName $DisplayName -AllowDeferred)
         }
     }
 } catch {

@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
   Bootstrap installer for the YSNLC School Quiz Kiosk.
@@ -13,7 +13,8 @@
   installs the kiosk, installs the scheduled updater, and schedules a Windows restart.
 
   Re-running the command on a computer with an active SchoolQuizKiosk installation does not
-  reinstall or reconfigure the kiosk. It only installs or repairs the automatic updater.
+  reinstall or reconfigure Assigned Access. It refreshes the YSNLC-Student wallpaper/profile
+  branding using the latest verified setup payload, then installs or repairs the automatic updater.
 
   The setup and updater payloads are saved to disk before execution because setup.ps1 relies
   on its own file path for elevation and its LocalSystem configuration stage.
@@ -23,7 +24,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$BootstrapVersion = '1.1.0'
+$BootstrapVersion = '1.2.0'
 $ManifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPath = '/technical-ysnlc/kiosk/'
@@ -332,13 +333,31 @@ try {
             throw 'A major kiosk upgrade requires removing the active kiosk first, restarting Windows, and then running this one-line installer again.'
         }
 
-        Write-Host 'The active kiosk will not be reinstalled or reconfigured.' -ForegroundColor Yellow
+        Write-Host 'The active kiosk Assigned Access configuration will not be reinstalled or changed.' -ForegroundColor Yellow
+        Write-Host 'Refreshing YSNLC-Student wallpaper and profile picture...' -ForegroundColor Cyan
+        & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Branding
+        `$brandingExit = `$LASTEXITCODE
+        if (`$brandingExit -ne 0) {
+            Show-KioskFailureDetails
+            Write-Warning "The active kiosk remains restricted, but the branding refresh returned exit code `$brandingExit."
+        } else {
+            Write-Host 'Kiosk branding refresh completed.' -ForegroundColor Green
+        }
+
         Write-Host 'Installing or repairing the automatic updater...' -ForegroundColor Cyan
         & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedUpdater -Mode InstallTask
         if (`$LASTEXITCODE -ne 0) {
             throw "Updater installation returned exit code `$LASTEXITCODE."
         }
-        Write-Host 'Automatic updater installation or repair completed. No restart was requested.' -ForegroundColor Green
+        Write-Host 'Automatic updater installation or repair completed.' -ForegroundColor Green
+
+        if (`$brandingExit -ne 0) {
+            throw 'Assigned Access was left unchanged, but the wallpaper/profile branding refresh failed. Review the details above.'
+        }
+
+        Write-Host ''
+        Write-Host 'Existing kiosk maintenance completed. No kiosk reinstall and no automatic restart were requested.' -ForegroundColor Green
+        Write-Host 'If YSNLC-Student is currently signed in, sign out/in or restart Windows to refresh the visible wallpaper/profile picture.' -ForegroundColor Yellow
         exit 0
     }
 
