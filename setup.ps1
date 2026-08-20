@@ -1,26 +1,31 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  Installs, removes, or diagnoses a locked-down Google Chrome school quiz kiosk.
+  Installs, removes, or diagnoses a restricted multi-app school workstation.
 
 .DESCRIPTION
-  - Uses Windows Assigned Access with a classic desktop application.
-  - Auto-creates and auto-signs-in a standard kiosk account.
-  - Starts Chrome full-screen at https://quiz.ysnlc.com/.
-  - Launches Chrome only for the kiosk session; website filtering is left to your hosts/network filter.
+  - Uses Windows Assigned Access restricted user experience (multi-app).
+  - Auto-creates and auto-signs-in a managed standard account named on-screen as YSNLC App User.
+  - Pins YSNLC Quiz App, Student Files, and any detected Word, Excel, and PowerPoint apps.
+  - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito window.
+  - File Explorer is restricted to the managed user's Downloads folder.
+  - Chrome website filtering is left to your existing hosts/network filter.
   - Runs the Assigned Access MDM Bridge portion as LocalSystem by using a temporary scheduled task.
   - Reversibly disables the pre-existing standard account named YSNLC by default, so it
     cannot remain an unrestricted route to the desktop.
+  - Repairs required Assigned Access/AppLocker service startup settings when they were disabled,
+    and records their previous settings for removal.
   - Includes rollback and diagnostics modes.
 
   IMPORTANT:
   1. This script is intended for Windows 11 Pro, Enterprise, Education, or IoT Enterprise.
   2. This version does NOT apply computer-wide Chrome URL policies. Administrator Chrome remains unrestricted.
-  3. Modified/stripped Windows images can be missing Assigned Access components. The script
+  3. Microsoft Office is not installed by this script. Word, Excel, and PowerPoint are included only when detected.
+  4. Modified/stripped Windows images can be missing Assigned Access components. The script
      detects that condition and writes a diagnostic report instead of attempting an unsafe hack.
-  4. Website filtering is intentionally not enforced by this script. Use your hosts/network filtering
-     if students must be prevented from visiting unrelated sites. Test the quiz on one computer first.
-  5. Set a strong password on every administrator account before using the kiosk.
+  5. Website filtering is intentionally not enforced by this script. Use your hosts/network filtering
+     if students must be prevented from visiting unrelated sites. Test the complete workflow on one computer first.
+  6. Set a strong password on every administrator account before using the workstation.
 
 .EXAMPLE
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Install -Restart
@@ -41,7 +46,7 @@ param(
     [string]$Url = 'https://quiz.ysnlc.com/',
 
     [ValidateLength(1, 64)]
-    [string]$DisplayName = 'YSNLC School Quiz',
+    [string]$DisplayName = 'YSNLC App User',
 
     [AllowEmptyString()]
     [ValidateLength(0, 64)]
@@ -67,8 +72,9 @@ $ChromePolicyBackupPath = Join-Path $Root 'ChromePolicies-BeforeKiosk.reg'
 $ChromePolicyAbsentMarker = Join-Path $Root 'ChromePolicies-WereAbsent.marker'
 $AssignedAccessBackupPath = Join-Path $Root 'AssignedAccess-BeforeKiosk.txt'
 $AssignedAccessAbsentMarker = Join-Path $Root 'AssignedAccess-WasAbsent.marker'
-$KioskVersion = '1.4.0'
-$BreakoutSequence = 'Ctrl+Alt+Q'
+$ServiceBackupPath = Join-Path $Root 'ServiceState-BeforeKiosk.json'
+$ShortcutRoot = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\YSNLC School'
+$KioskVersion = '2.0.0'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -162,7 +168,8 @@ function Test-KioskInstallEvidence {
         $ChromePolicyBackupPath,
         $ChromePolicyAbsentMarker,
         $AssignedAccessBackupPath,
-        $AssignedAccessAbsentMarker
+        $AssignedAccessAbsentMarker,
+        $ServiceBackupPath
     )) {
         if (Test-Path -LiteralPath $path) {
             return $true
@@ -197,6 +204,11 @@ function Assert-SupportedEdition {
 
     if ($WindowsInfo.EditionId -notmatch 'Professional|Enterprise|Education|IoTEnterprise') {
         throw "Assigned Access is not supported by this Windows edition: $($WindowsInfo.EditionId). Use Windows 11 Pro, Enterprise, Education, or IoT Enterprise."
+    }
+
+    $buildNumber = 0
+    if (-not [int]::TryParse([string]$WindowsInfo.CurrentBuild, [ref]$buildNumber) -or $buildNumber -lt 22000) {
+        throw "This multi-app configuration requires Windows 11. Detected build: $($WindowsInfo.CurrentBuild)."
     }
 }
 
@@ -272,6 +284,230 @@ function Install-ChromeEnterprise {
     Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
     Write-Log "Chrome installed at: $chrome" 'OK'
     return $chrome
+}
+
+function Get-OfficeExecutable {
+    param([Parameter(Mandatory = $true)][string]$ExeName)
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $roots = @()
+    if ($env:ProgramFiles) { $roots += $env:ProgramFiles }
+    if (${env:ProgramFiles(x86)}) { $roots += ${env:ProgramFiles(x86)} }
+
+    foreach ($root in ($roots | Select-Object -Unique)) {
+        foreach ($relative in @(
+            "Microsoft Office\root\Office16\$ExeName",
+            "Microsoft Office\Office16\$ExeName",
+            "Microsoft Office\Office15\$ExeName"
+        )) {
+            $candidates.Add((Join-Path $root $relative))
+        }
+    }
+
+    foreach ($registryRoot in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths'
+    )) {
+        $key = Join-Path $registryRoot $ExeName
+        if (Test-Path -LiteralPath $key) {
+            try {
+                $item = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
+                $defaultPath = [string]$item.'(default)'
+                if (-not [string]::IsNullOrWhiteSpace($defaultPath)) {
+                    $candidates.Add($defaultPath.Trim('"'))
+                }
+            } catch {
+                # Candidate registry entry is optional; continue with file-system candidates.
+            }
+        }
+    }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    return $null
+}
+
+function Get-OfficeApps {
+    $definitions = @(
+        [pscustomobject]@{ Name = 'Microsoft Word';       Exe = 'WINWORD.EXE';  Path = (Get-OfficeExecutable -ExeName 'WINWORD.EXE') },
+        [pscustomobject]@{ Name = 'Microsoft Excel';      Exe = 'EXCEL.EXE';    Path = (Get-OfficeExecutable -ExeName 'EXCEL.EXE') },
+        [pscustomobject]@{ Name = 'Microsoft PowerPoint'; Exe = 'POWERPNT.EXE'; Path = (Get-OfficeExecutable -ExeName 'POWERPNT.EXE') }
+    )
+
+    return @($definitions | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Path) })
+}
+
+function New-KioskShortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [string]$Arguments = '',
+        [string]$IconLocation = ''
+    )
+
+    if (-not (Test-Path -LiteralPath $ShortcutRoot)) {
+        New-Item -ItemType Directory -Path $ShortcutRoot -Force | Out-Null
+    }
+
+    $linkPath = Join-Path $ShortcutRoot ($Name + '.lnk')
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $shortcut = $shell.CreateShortcut($linkPath)
+        $shortcut.TargetPath = $TargetPath
+        if (-not [string]::IsNullOrWhiteSpace($Arguments)) {
+            $shortcut.Arguments = $Arguments
+        }
+        if (-not [string]::IsNullOrWhiteSpace($IconLocation)) {
+            $shortcut.IconLocation = $IconLocation
+        }
+        $shortcut.Save()
+    } finally {
+        if ($shell) {
+            [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+        }
+    }
+
+    return $linkPath
+}
+
+function Install-KioskShortcuts {
+    param(
+        [Parameter(Mandatory = $true)][string]$ChromePath,
+        [Parameter(Mandatory = $true)][string]$KioskUrl,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$OfficeApps
+    )
+
+    if (Test-Path -LiteralPath $ShortcutRoot) {
+        Remove-Item -LiteralPath $ShortcutRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $ShortcutRoot -Force | Out-Null
+
+    $quizArgs = '--start-maximized --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --overscroll-history-navigation=0 "{0}"' -f $KioskUrl
+    New-KioskShortcut -Name 'YSNLC Quiz App' -TargetPath $ChromePath -Arguments $quizArgs -IconLocation ($ChromePath + ',0') | Out-Null
+    New-KioskShortcut -Name 'Student Files' -TargetPath "$env:WINDIR\explorer.exe" -Arguments 'shell:Downloads' -IconLocation ("$env:WINDIR\explorer.exe,0") | Out-Null
+
+    foreach ($app in $OfficeApps) {
+        New-KioskShortcut -Name ([string]$app.Name) -TargetPath ([string]$app.Path) -IconLocation (([string]$app.Path) + ',0') | Out-Null
+    }
+
+    Write-Log "Created restricted-user Start shortcuts under: $ShortcutRoot" 'OK'
+}
+
+function Remove-KioskShortcuts {
+    if (Test-Path -LiteralPath $ShortcutRoot) {
+        Remove-Item -LiteralPath $ShortcutRoot -Recurse -Force -ErrorAction Stop
+        Write-Log 'Removed YSNLC restricted-user Start shortcuts.' 'OK'
+    }
+}
+
+function Get-ServiceSnapshot {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $service = Get-CimInstance Win32_Service -Filter ("Name='{0}'" -f $Name.Replace("'", "''")) -ErrorAction SilentlyContinue
+    if (-not $service) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Name      = [string]$service.Name
+        StartMode = [string]$service.StartMode
+        State     = [string]$service.State
+    }
+}
+
+function Set-ServiceStartupWithSc {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('auto','demand','disabled')][string]$Startup
+    )
+
+    & "$env:SystemRoot\System32\sc.exe" config $Name start= $Startup *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not configure Windows service ${Name}. sc.exe exit code: $LASTEXITCODE"
+    }
+}
+
+function Ensure-RequiredKioskServices {
+    $required = @(
+        [pscustomobject]@{ Name = 'AssignedAccessManagerSvc'; Startup = 'demand' },
+        [pscustomobject]@{ Name = 'AppIDSvc';                Startup = 'auto' }
+    )
+
+    if (-not (Test-Path -LiteralPath $ServiceBackupPath)) {
+        $snapshots = @()
+        foreach ($item in $required) {
+            $snapshot = Get-ServiceSnapshot -Name $item.Name
+            if (-not $snapshot) {
+                throw "Required Windows kiosk service is missing: $($item.Name). This Windows image may have removed a required component."
+            }
+            $snapshots += $snapshot
+        }
+        Write-JsonFile -InputObject $snapshots -Path $ServiceBackupPath
+    }
+
+    foreach ($item in $required) {
+        $snapshot = Get-ServiceSnapshot -Name $item.Name
+        if (-not $snapshot) {
+            throw "Required Windows kiosk service is missing: $($item.Name)."
+        }
+
+        Set-ServiceStartupWithSc -Name $item.Name -Startup $item.Startup
+        try {
+            Start-Service -Name $item.Name -ErrorAction Stop
+            Write-Log "Required service $($item.Name) is enabled and running." 'OK'
+        } catch {
+            if ($item.Name -eq 'AssignedAccessManagerSvc') {
+                # AssignedAccessManagerSvc is normally Manual/trigger-start. It only needs to be
+                # enabled so Windows can start it when Assigned Access configuration is applied.
+                Write-Log "AssignedAccessManagerSvc is enabled but did not stay running; Windows may trigger-start it during configuration. $($_.Exception.Message)" 'WARN'
+            } else {
+                throw
+            }
+        }
+    }
+}
+
+function Restore-RequiredKioskServices {
+    if (-not (Test-Path -LiteralPath $ServiceBackupPath)) {
+        return
+    }
+
+    $snapshots = @(Read-JsonFile -Path $ServiceBackupPath)
+    foreach ($snapshot in $snapshots) {
+        $name = [string]$snapshot.Name
+        if ([string]::IsNullOrWhiteSpace($name) -or -not (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
+            continue
+        }
+
+        if ($name -eq 'AppIDSvc' -and [string]$snapshot.StartMode -eq 'Manual') {
+            # Microsoft documents that AppIDSvc can't be changed back to Manual with sc.exe.
+            # Leaving it Automatic is safe after kiosk removal and avoids an unsupported registry hack.
+            Write-Log 'AppIDSvc was originally Manual. Windows does not support restoring that protected service to Manual with sc.exe, so it is left Automatic.' 'WARN'
+            continue
+        }
+
+        $startup = switch ([string]$snapshot.StartMode) {
+            'Auto'     { 'auto' }
+            'Manual'   { 'demand' }
+            'Disabled' { 'disabled' }
+            default    { 'demand' }
+        }
+
+        if ($startup -eq 'disabled') {
+            Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+        } elseif ([string]$snapshot.State -eq 'Stopped') {
+            Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+        }
+
+        Set-ServiceStartupWithSc -Name $name -Startup $startup
+        Write-Log "Restored service startup setting for $name to $($snapshot.StartMode)." 'OK'
+    }
+
+    Remove-Item -LiteralPath $ServiceBackupPath -Force -ErrorAction SilentlyContinue
 }
 
 function Backup-ChromePolicies {
@@ -402,23 +638,51 @@ function Build-AssignedAccessXml {
         [Parameter(Mandatory = $true)][string]$ChromePath,
         [Parameter(Mandatory = $true)][string]$KioskUrl,
         [Parameter(Mandatory = $true)][string]$KioskDisplayName,
-        [Parameter(Mandatory = $true)][string]$ProfileId
+        [Parameter(Mandatory = $true)][string]$ProfileId,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$OfficeApps
     )
 
-    $arguments = "--kiosk $KioskUrl --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --disable-extensions --noerrdialogs --disable-pinch --overscroll-history-navigation=0"
     $escapedChromePath = [System.Security.SecurityElement]::Escape($ChromePath)
-    $escapedArguments = [System.Security.SecurityElement]::Escape($arguments)
     $escapedDisplayName = [System.Security.SecurityElement]::Escape($KioskDisplayName)
+    $escapedExplorerPath = [System.Security.SecurityElement]::Escape("$env:WINDIR\explorer.exe")
+
+    $allowedApps = New-Object System.Collections.Generic.List[string]
+    $allowedApps.Add(('        <App DesktopAppPath="{0}" />' -f $escapedChromePath))
+    $allowedApps.Add(('        <App DesktopAppPath="{0}" />' -f $escapedExplorerPath))
+
+    foreach ($app in $OfficeApps) {
+        $escapedPath = [System.Security.SecurityElement]::Escape([string]$app.Path)
+        $allowedApps.Add(('        <App DesktopAppPath="{0}" />' -f $escapedPath))
+    }
+
+    $pinLinks = New-Object System.Collections.Generic.List[object]
+    $baseLink = '%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\YSNLC School\'
+    $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + 'YSNLC Quiz App.lnk' })
+    foreach ($app in $OfficeApps) {
+        $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + ([string]$app.Name) + '.lnk' })
+    }
+    $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + 'Student Files.lnk' })
+
+    $startPinsJson = ([ordered]@{ pinnedList = @($pinLinks) } | ConvertTo-Json -Depth 5 -Compress)
+    $allowedAppsXml = $allowedApps -join "`r`n"
 
     return @"
 <?xml version="1.0" encoding="utf-8"?>
 <AssignedAccessConfiguration xmlns="http://schemas.microsoft.com/AssignedAccess/2017/config"
     xmlns:rs5="http://schemas.microsoft.com/AssignedAccess/201810/config"
-    xmlns:v4="http://schemas.microsoft.com/AssignedAccess/2021/config">
+    xmlns:v5="http://schemas.microsoft.com/AssignedAccess/2022/config">
   <Profiles>
-    <Profile Id="$ProfileId">
-      <KioskModeApp v4:ClassicAppPath="$escapedChromePath" v4:ClassicAppArguments="$escapedArguments" />
-      <v4:BreakoutSequence Key="$BreakoutSequence" />
+    <Profile Id="$ProfileId" Name="YSNLC Restricted Student Experience">
+      <AllAppsList>
+        <AllowedApps>
+$allowedAppsXml
+        </AllowedApps>
+      </AllAppsList>
+      <rs5:FileExplorerNamespaceRestrictions>
+        <rs5:AllowedNamespace Name="Downloads" />
+      </rs5:FileExplorerNamespaceRestrictions>
+      <v5:StartPins><![CDATA[$startPinsJson]]></v5:StartPins>
+      <Taskbar ShowTaskbar="true" />
     </Profile>
   </Profiles>
   <Configs>
@@ -586,8 +850,9 @@ function Write-DiagnosticReport {
     $info = Get-WindowsInfo
     $uac = Get-RegistryDwordValue -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'EnableLUA'
     $chrome = Get-ChromeExecutable
+    $officeApps = @(Get-OfficeApps)
 
-    $lines.Add('School Quiz Kiosk diagnostics')
+    $lines.Add('YSNLC restricted student experience diagnostics')
     $lines.Add(('Generated: {0}' -f (Get-Date)))
     $lines.Add(('Script version: {0}' -f $KioskVersion))
     $lines.Add('')
@@ -597,6 +862,18 @@ function Write-DiagnosticReport {
     $lines.Add(('Build: {0}.{1}' -f $info.CurrentBuild, $info.UBR))
     $lines.Add(('UAC EnableLUA: {0}' -f $uac))
     $lines.Add(('Chrome: {0}' -f $(if ($chrome) { $chrome } else { 'Not found' })))
+    foreach ($officeName in @('Microsoft Word','Microsoft Excel','Microsoft PowerPoint')) {
+        $office = $officeApps | Where-Object Name -eq $officeName | Select-Object -First 1
+        $lines.Add(('{0}: {1}' -f $officeName, $(if ($office) { [string]$office.Path } else { 'Not found' })))
+    }
+    foreach ($serviceName in @('AssignedAccessManagerSvc','AppIDSvc')) {
+        $svc = Get-ServiceSnapshot -Name $serviceName
+        if ($svc) {
+            $lines.Add(('Service {0}: StartMode={1}; State={2}' -f $serviceName, $svc.StartMode, $svc.State))
+        } else {
+            $lines.Add(('Service {0}: Missing' -f $serviceName))
+        }
+    }
     $lines.Add('')
 
     try {
@@ -795,37 +1072,60 @@ function Install-Kiosk {
         Write-Log "Chrome found at: $chrome" 'OK'
     }
 
-    # Kept for backward-compatible rollback logic; v1.4+ does not create machine-wide Chrome policies.
-    $policySetupStarted = $false
+    $officeApps = @(Get-OfficeApps)
+    foreach ($wanted in @('Microsoft Word','Microsoft Excel','Microsoft PowerPoint')) {
+        $found = $officeApps | Where-Object Name -eq $wanted | Select-Object -First 1
+        if ($found) {
+            Write-Log "$wanted found at: $($found.Path)" 'OK'
+        } else {
+            Write-Log "$wanted was not found and will not appear for the student user. Install Microsoft Office/Microsoft 365 first if this app is required." 'WARN'
+        }
+    }
+
     $assignedAccessAttempted = $false
+    $shortcutsCreated = $false
+    $servicesChanged = $false
     $disabledUserInfo = [pscustomobject]@{
         Name       = $null
         WasEnabled = $false
     }
 
     try {
+        Ensure-RequiredKioskServices
+        $servicesChanged = $true
+
         Set-ChromeKioskPolicies -KioskUrl $Url
+        Install-KioskShortcuts -ChromePath $chrome -KioskUrl $Url -OfficeApps $officeApps
+        $shortcutsCreated = $true
 
         $profileId = '{' + [Guid]::NewGuid().ToString().ToUpperInvariant() + '}'
-        $xml = Build-AssignedAccessXml -ChromePath $chrome -KioskUrl $Url -KioskDisplayName $DisplayName -ProfileId $profileId
+        $xml = Build-AssignedAccessXml `
+            -ChromePath $chrome `
+            -KioskUrl $Url `
+            -KioskDisplayName $DisplayName `
+            -ProfileId $profileId `
+            -OfficeApps $officeApps
         $xml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
 
-        # The screenshot shows a normal local account named YSNLC. A normal account
-        # would remain a route to the desktop, so disable it reversibly by default.
+        # A normal local account named YSNLC would remain a route to an unrestricted desktop,
+        # so disable it reversibly by default before creating the managed Assigned Access account.
         $disabledUserInfo = Disable-ConflictingLocalUser -UserName $DisableLocalUser
         Assert-NoEnabledStandardUsersRemain
 
         $state = [ordered]@{
-            Version                       = $KioskVersion
-            Url                           = $Url
-            DisplayName                   = $DisplayName
-            ChromePath                    = $chrome
-            ProfileId                     = $profileId
-            BreakoutSequence              = $BreakoutSequence
-            ChromePolicyScope              = 'None-MachineWide'
-            DisabledLocalUserName         = $disabledUserInfo.Name
-            DisabledLocalUserWasEnabled   = $disabledUserInfo.WasEnabled
-            InstalledAt                   = (Get-Date).ToString('o')
+            Version                     = $KioskVersion
+            Experience                  = 'RestrictedMultiApp'
+            Url                         = $Url
+            DisplayName                 = $DisplayName
+            ChromePath                  = $chrome
+            OfficeApps                  = @($officeApps | ForEach-Object { [ordered]@{ Name = $_.Name; Path = $_.Path } })
+            FileExplorerNamespace       = 'DownloadsOnly'
+            ProfileId                   = $profileId
+            ChromePolicyScope           = 'None-MachineWide'
+            ShortcutRoot                = $ShortcutRoot
+            DisabledLocalUserName       = $disabledUserInfo.Name
+            DisabledLocalUserWasEnabled = $disabledUserInfo.WasEnabled
+            InstalledAt                 = (Get-Date).ToString('o')
         }
         Write-JsonFile -InputObject $state -Path $StatePath
 
@@ -833,7 +1133,7 @@ function Install-Kiosk {
         Invoke-SystemTask -SystemMode Install
     } catch {
         $applyError = $_.Exception.Message
-        Write-Log 'Kiosk setup failed. Attempting a safe rollback.' 'WARN'
+        Write-Log 'Restricted student experience setup failed. Attempting a safe rollback.' 'WARN'
 
         $assignedAccessCleared = -not $assignedAccessAttempted
         if ($assignedAccessAttempted) {
@@ -845,26 +1145,29 @@ function Install-Kiosk {
                     Write-Log "Assigned Access rollback could not be confirmed: $($_.Exception.Message)" 'WARN'
                 }
             } else {
-                # The system stage creates a backup marker before it changes Assigned Access.
-                # With no marker, it failed before touching the Windows kiosk configuration.
                 $assignedAccessCleared = $true
                 Write-Log 'Assigned Access was not modified before the system-stage failure, so local rollback is safe.' 'WARN'
             }
         }
 
         if ($assignedAccessCleared) {
-            if ($policySetupStarted) {
-                try {
-                    Restore-ChromePolicies
-                } catch {
-                    Write-Log "Chrome policy rollback also failed: $($_.Exception.Message)" 'WARN'
-                }
-            }
-
             try {
                 Restore-ConflictingLocalUser -UserName ([string]$disabledUserInfo.Name) -WasEnabled ([bool]$disabledUserInfo.WasEnabled)
             } catch {
                 Write-Log "The original local account could not be restored: $($_.Exception.Message)" 'WARN'
+            }
+
+            try {
+                Remove-ManagedKioskUserIfPresent -ExpectedDisplayName $DisplayName
+            } catch {
+                Write-Log "Managed kiosk-user rollback failed: $($_.Exception.Message)" 'WARN'
+            }
+
+            if ($shortcutsCreated) {
+                try { Remove-KioskShortcuts } catch { Write-Log "Shortcut rollback failed: $($_.Exception.Message)" 'WARN' }
+            }
+            if ($servicesChanged -or (Test-Path -LiteralPath $ServiceBackupPath)) {
+                try { Restore-RequiredKioskServices } catch { Write-Log "Service rollback failed: $($_.Exception.Message)" 'WARN' }
             }
 
             Clear-AssignedAccessBackup
@@ -872,17 +1175,19 @@ function Install-Kiosk {
                 Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
             }
         } else {
-            Write-Log 'Chrome restrictions and the disabled normal account were intentionally left in place because Windows could not confirm that Assigned Access was cleared. This prevents a partially configured kiosk from exposing an unrestricted desktop or browser.' 'WARN'
+            Write-Log 'The normal student account remains disabled because Windows could not confirm that Assigned Access was cleared.' 'WARN'
         }
 
         throw $applyError
     }
 
-    Write-Log "Kiosk installation is complete. Maintenance breakout sequence: $BreakoutSequence" 'OK'
+    Write-Log 'Restricted multi-app student experience installation is complete.' 'OK'
     Write-Host ''
-    Write-Host 'IMPORTANT: The kiosk restrictions activate after restart.' -ForegroundColor Green
-    Write-Host "To leave the kiosk for maintenance, press $BreakoutSequence and sign in to the administrator account." -ForegroundColor Green
+    Write-Host 'IMPORTANT: Restart Windows to activate the restricted student account.' -ForegroundColor Green
+    Write-Host 'Student Start menu: YSNLC Quiz App, Student Files, plus detected Word/Excel/PowerPoint.' -ForegroundColor Green
+    Write-Host 'Student File Explorer access is restricted to Downloads.' -ForegroundColor Green
     Write-Host 'Chrome URL policies are not applied machine-wide; Administrator Chrome remains unrestricted.' -ForegroundColor Green
+    Write-Host 'For administrator maintenance, press Ctrl+Alt+Del, sign out of the student account, then sign in as Administrator.' -ForegroundColor Yellow
 
     Complete-WithOptionalRestart -RestartRequired $true
 }
@@ -914,7 +1219,15 @@ function Remove-Kiosk {
         # means a prior attempt stopped before Windows kiosk configuration was touched.
         Write-Log 'No SchoolQuizKiosk Assigned Access change marker was found; Windows kiosk configuration was left unchanged.' 'WARN'
     }
-    Restore-ChromePolicies
+    if ((Test-Path -LiteralPath $ChromePolicyBackupPath) -or (Test-Path -LiteralPath $ChromePolicyAbsentMarker)) {
+        Restore-ChromePolicies
+    }
+
+    try {
+        Remove-KioskShortcuts
+    } catch {
+        Write-Log "The YSNLC Start shortcuts could not be removed: $($_.Exception.Message)" 'WARN'
+    }
 
     if ($state) {
         try {
@@ -927,13 +1240,18 @@ function Remove-Kiosk {
     }
 
     Remove-ManagedKioskUserIfPresent -ExpectedDisplayName $display
+    try {
+        Restore-RequiredKioskServices
+    } catch {
+        Write-Log "Required-service settings could not be fully restored: $($_.Exception.Message)" 'WARN'
+    }
     Clear-AssignedAccessBackup
 
     foreach ($path in @($XmlPath, $StatePath, $SystemRequestPath, $SystemResultPath)) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     }
 
-    Write-Log 'Kiosk removal is complete. Restart Windows to return to the normal sign-in experience.' 'OK'
+    Write-Log 'Restricted student experience removal is complete. Restart Windows to return to the normal sign-in experience.' 'OK'
     Complete-WithOptionalRestart -RestartRequired $true
 }
 
@@ -975,7 +1293,7 @@ try {
     }
 
     Write-Host ''
-    Write-Host 'The kiosk was not fully configured.' -ForegroundColor Red
+    Write-Host 'The restricted student experience was not fully configured.' -ForegroundColor Red
     if ($report) {
         Write-Host "Review this report: $report" -ForegroundColor Yellow
     }

@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$BootstrapVersion = '1.0.1'
+$BootstrapVersion = '1.0.2'
 $ManifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPath = '/technical-ysnlc/kiosk/'
@@ -182,7 +182,7 @@ try {
     $updaterPath = Join-Path $TempRoot 'Update-SchoolQuizKiosk.ps1'
 
     Write-Host ''
-    Write-Host "YSNLC School Quiz Kiosk bootstrap v$BootstrapVersion" -ForegroundColor Cyan
+    Write-Host "YSNLC Student Apps bootstrap v$BootstrapVersion" -ForegroundColor Cyan
     Write-Host 'Downloading the update manifest...' -ForegroundColor Cyan
     Invoke-Download -Url $ManifestUrl -OutFile $manifestPath
 
@@ -284,7 +284,25 @@ try {
     if (Test-Path -LiteralPath `$statePath) {
         Write-Host ''
         Write-Host 'An active SchoolQuizKiosk installation was detected.' -ForegroundColor Yellow
-        Write-Host 'The kiosk will not be reinstalled or reconfigured.' -ForegroundColor Yellow
+
+        `$installedVersion = `$null
+        try {
+            `$installedState = Get-Content -LiteralPath `$statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (`$installedState.Version) {
+                `$installedVersion = [version]([string]`$installedState.Version)
+            }
+        } catch {
+            Write-Warning "The installed kiosk version could not be read: `$(`$_.Exception.Message)"
+        }
+
+        `$availableVersion = [version]'$setupVersion'
+        if (`$installedVersion -and `$availableVersion.Major -gt `$installedVersion.Major) {
+            Write-Host "Installed version: `$installedVersion" -ForegroundColor Yellow
+            Write-Host "Available version: `$availableVersion" -ForegroundColor Yellow
+            throw 'A major kiosk upgrade requires removing the active kiosk first, restarting Windows, and then running this one-line installer again.'
+        }
+
+        Write-Host 'The active kiosk will not be reinstalled or reconfigured.' -ForegroundColor Yellow
         Write-Host 'Installing or repairing the automatic updater...' -ForegroundColor Cyan
         & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedUpdater -Mode InstallTask
         if (`$LASTEXITCODE -ne 0) {
@@ -295,7 +313,7 @@ try {
     }
 
     Write-Host ''
-    Write-Host 'Installing the School Quiz Kiosk...' -ForegroundColor Cyan
+    Write-Host 'Installing the YSNLC restricted student experience...' -ForegroundColor Cyan
     & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Install
     if (`$LASTEXITCODE -ne 0) {
         throw "Kiosk setup returned exit code `$LASTEXITCODE."
