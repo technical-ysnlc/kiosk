@@ -86,7 +86,7 @@ Ctrl + Alt + Q
 
 Then sign in with the Administrator account.
 
-Chrome restrictions apply to every Windows account while the kiosk is installed. Use **Microsoft Edge** for Administrator browsing.
+Chrome URL restrictions are **not** applied computer-wide. Administrator Chrome remains normal. The kiosk still launches Chrome full-screen, while website blocking should be handled by your existing hosts/network filter.
 
 ## Updating the Scripts
 
@@ -101,7 +101,7 @@ When changing `Update-SchoolQuizKiosk.ps1`, also increase `$UpdaterVersion`.
 
 The automatic updater updates the protected management script. It does not automatically change an active kiosk configuration.
 
-When an update changes Chrome policies or kiosk behavior, remove the kiosk and run the one-line installer again after testing the change on one computer.
+When an update changes kiosk behavior, remove the kiosk and run the one-line installer again after testing the change on one computer.
 
 ## Remove the Kiosk
 
