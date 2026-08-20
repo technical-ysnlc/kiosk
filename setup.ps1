@@ -79,7 +79,7 @@ $AssignedAccessBackupPath = Join-Path $Root 'AssignedAccess-BeforeKiosk.txt'
 $AssignedAccessAbsentMarker = Join-Path $Root 'AssignedAccess-WasAbsent.marker'
 $ServiceBackupPath = Join-Path $Root 'ServiceState-BeforeKiosk.json'
 $ShortcutRoot = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\YSNLC School'
-$KioskVersion = '2.1.2'
+$KioskVersion = '2.1.3'
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -1214,13 +1214,13 @@ function Invoke-KioskPreflight {
     }
 
     try {
+        # Assigned Access is a device-scope CSP. Microsoft requires device-setting calls through
+        # the MDM Bridge WMI Provider to run as LocalSystem. An elevated administrator can see
+        # the class yet receive no MDM_AssignedAccess instance, which is not a valid install-time
+        # failure signal. The actual configuration stage already runs as LocalSystem and performs
+        # the authoritative Get-CimInstance check before writing any Assigned Access XML.
         Get-CimClass -Namespace 'root\cimv2\mdm\dmmap' -ClassName 'MDM_AssignedAccess' -ErrorAction Stop | Out-Null
-        $instance = Get-CimInstance -Namespace 'root\cimv2\mdm\dmmap' -ClassName 'MDM_AssignedAccess' -ErrorAction Stop | Select-Object -First 1
-        if ($instance) {
-            Add-Check 'Assigned Access MDM provider' 'PASS' 'MDM_AssignedAccess is present and queryable.'
-        } else {
-            Add-Check 'Assigned Access MDM provider' 'FAIL' 'MDM_AssignedAccess exists but Windows returned no provider instance.'
-        }
+        Add-Check 'Assigned Access MDM provider' 'PASS' 'MDM_AssignedAccess class is present. The device-level provider instance will be verified during the LocalSystem installation stage.'
     } catch {
         Add-Check 'Assigned Access MDM provider' 'FAIL' $_.Exception.Message
     }
