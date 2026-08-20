@@ -7,6 +7,7 @@ on:
     paths:
       - setup.ps1
       - Update-SchoolQuizKiosk.ps1
+      - install.ps1
       - .github/workflows/update-manifest.yml
   workflow_dispatch:
 
@@ -33,6 +34,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $setupPath = Join-Path $env:GITHUB_WORKSPACE 'setup.ps1'
           $updaterPath = Join-Path $env:GITHUB_WORKSPACE 'Update-SchoolQuizKiosk.ps1'
+          $bootstrapPath = Join-Path $env:GITHUB_WORKSPACE 'install.ps1'
           $manifestPath = Join-Path $env:GITHUB_WORKSPACE 'update.json'
 
           function Assert-PowerShellSyntax {
@@ -83,6 +85,7 @@ jobs:
 
           Assert-PowerShellSyntax -Path $setupPath -DisplayName 'setup.ps1'
           Assert-PowerShellSyntax -Path $updaterPath -DisplayName 'Update-SchoolQuizKiosk.ps1'
+          Assert-PowerShellSyntax -Path $bootstrapPath -DisplayName 'install.ps1'
 
           $setupVersionText = Get-EmbeddedVersion -Path $setupPath -VariableName 'KioskVersion'
           $updaterVersionText = Get-EmbeddedVersion -Path $updaterPath -VariableName 'UpdaterVersion'
