@@ -42,7 +42,7 @@ param(
     [string]$Url = 'https://quiz.ysnlc.com/',
 
     [ValidateLength(1, 64)]
-    [string]$DisplayName = 'YSNLC School Quiz',
+    [string]$DisplayName = 'YSNLC Quiz App',
 
     [AllowEmptyString()]
     [ValidateLength(0, 64)]
