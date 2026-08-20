@@ -6,13 +6,25 @@ This project configures a Windows computer as a locked-down, single-app school q
 https://quiz.ysnlc.com/
 ```
 
-The main installer is:
+The GitHub source installer is:
 
 ```text
-Setup-SchoolQuizKiosk.ps1
+setup.ps1
 ```
 
-The script supports installation, removal, diagnostics, rollback, and repeatable deployment across multiple school computers.
+During installation, it is copied to the protected Windows working path:
+
+```text
+C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1
+```
+
+The optional updater is:
+
+```text
+Update-SchoolQuizKiosk.ps1
+```
+
+The installer supports installation, removal, diagnostics, rollback, and repeatable deployment across multiple school computers. The updater can keep the protected management-script copy synchronized with verified updates published in this repository.
 
 > [!IMPORTANT]
 > Test the complete quiz workflow on one computer before deploying it to all seven computers. Modified Windows builds such as GhostSpectre may have removed the Windows Assigned Access components required by kiosk mode.
@@ -33,6 +45,7 @@ The script supports installation, removal, diagnostics, rollback, and repeatable
 - Restores the previous configuration when kiosk mode is removed.
 - Produces installation logs and detailed diagnostic reports.
 - Uses a protected LocalSystem scheduled task to apply the Assigned Access configuration.
+- Optionally installs a separate LocalSystem updater task that verifies and updates the protected management script from GitHub.
 
 ## Requirements
 
@@ -101,7 +114,7 @@ C:\ProgramData\SchoolQuizKiosk
 
 ## Quick Start
 
-Copy `Setup-SchoolQuizKiosk.ps1` to the Administrator desktop.
+Download the repository file `setup.ps1` to the Administrator desktop and save or rename it as `Setup-SchoolQuizKiosk.ps1`.
 
 Open **Windows Terminal as Administrator**, then run:
 
@@ -124,6 +137,242 @@ $k=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Setup-SchoolQuizKiosk.ps
 
 The script self-elevates when necessary, but starting from an Administrator terminal makes errors and prompts easier to understand.
 
+## Automatic GitHub Updater
+
+Add these files to the repository at the exact paths shown:
+
+```text
+Update-SchoolQuizKiosk.ps1
+update.json
+.github/workflows/update-manifest.yml
+```
+
+Keep the existing `setup.ps1` in the repository root. Replace `Readme.MD` with this updated documentation.
+
+The workflow watches both PowerShell scripts. When either script changes, it validates PowerShell syntax, reads the embedded version, calculates SHA-256, and refreshes `update.json`. The published URLs are pinned to one exact Git commit containing both scripts.
+
+`Update-SchoolQuizKiosk.ps1` then checks `update.json`, downloads the published `setup.ps1`, verifies its repository path, source commit, SHA-256, PowerShell syntax, and embedded `$KioskVersion`, creates a rotating backup, and replaces the protected management copy at:
+
+```text
+C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1
+```
+
+> [!IMPORTANT]
+> The updater changes the **protected management script only**. It does not change a copy left on the Administrator desktop, update itself automatically, remove or reinstall the kiosk, reapply Chrome policies, replace the active Assigned Access profile, or restart Windows. This prevents an untested configuration change from being applied automatically to all seven computers.
+
+> [!CAUTION]
+> The manifest and scripts are controlled by the same GitHub repository. Hash checking detects corrupted, incomplete, stale, mismatched, and locally modified files, but it is not an independent digital signature. Protect the GitHub account with multi-factor authentication, restrict repository write access, and review commits before deployment.
+
+### Prepare the GitHub repository
+
+1. Upload `Update-SchoolQuizKiosk.ps1` and `update.json` to the repository root.
+2. Create `.github/workflows/update-manifest.yml` using that complete path.
+3. Replace `Readme.MD` with the updated file.
+4. Commit the files to `main`.
+5. Open the **Actions** tab and wait for **Update kiosk manifest** to finish successfully.
+6. Open the generated `update.json` and confirm that `sourceCommit` contains 40 hexadecimal characters and both download URLs contain that same commit ID.
+
+The workflow needs `contents: write` permission so it can commit the generated manifest. If its final push is rejected, review **Settings → Actions → General → Workflow permissions**, branch protection, and repository rules.
+
+Do not install the automatic updater on the seven desktops until the workflow is green and the complete process has been tested on one computer.
+
+### Install the updater from a desktop copy
+
+Copy `Update-SchoolQuizKiosk.ps1` to the Administrator desktop. Open **Windows Terminal as Administrator**, then run:
+
+```powershell
+$u=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Update-SchoolQuizKiosk.ps1'; Unblock-File -LiteralPath $u; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $u -Mode InstallTask
+```
+
+This command:
+
+1. Copies the updater to `C:\ProgramData\SchoolQuizKiosk`.
+2. Creates a LocalSystem scheduled task named `SchoolQuizKiosk-Updater`.
+3. Checks immediately for a published installer update.
+4. Checks whenever the computer starts.
+5. Checks every day at 03:00 and starts later if that scheduled time was missed.
+
+Run the same command once on each desktop after the first-computer test succeeds.
+
+### Verified installation directly from GitHub
+
+After the workflow has generated a commit-pinned manifest, an administrator can download and verify the updater without first copying it to the desktop:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Open Windows Terminal as Administrator before running this command.'
+}
+
+$manifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
+$manifest = ((Invoke-WebRequest -Uri $manifestUrl -UseBasicParsing -TimeoutSec 60).Content | ConvertFrom-Json)
+
+if ([int]$manifest.schemaVersion -ne 1 -or [string]$manifest.productId -ne 'school-quiz-kiosk') {
+    throw 'Unexpected or unsupported update manifest.'
+}
+if ([string]$manifest.sourceCommit -notmatch '^[A-Fa-f0-9]{40}$') {
+    throw 'The manifest does not contain a full source commit.'
+}
+if ([string]$manifest.updaterVersion -notmatch '^\d+(?:\.\d+){2,3}$') {
+    throw 'The updater version is invalid.'
+}
+if ([string]$manifest.updaterSha256 -notmatch '^[A-Fa-f0-9]{64}$') {
+    throw 'The updater SHA-256 value is invalid.'
+}
+
+$expectedUrl = "https://raw.githubusercontent.com/technical-ysnlc/kiosk/$($manifest.sourceCommit)/Update-SchoolQuizKiosk.ps1"
+if (-not ([string]$manifest.updaterUrl).Equals($expectedUrl, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The updater URL does not match the manifest source commit.'
+}
+
+$updater = Join-Path $env:TEMP ("Update-SchoolQuizKiosk-{0}.ps1" -f ([Guid]::NewGuid().ToString('N')))
+try {
+    Invoke-WebRequest -Uri $expectedUrl -UseBasicParsing -TimeoutSec 60 -OutFile $updater
+
+    $actualHash = (Get-FileHash -LiteralPath $updater -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne ([string]$manifest.updaterSha256).ToLowerInvariant()) {
+        throw "Updater verification failed. Expected $($manifest.updaterSha256), received $actualHash."
+    }
+
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($updater, [ref]$tokens, [ref]$parseErrors) | Out-Null
+    if ($parseErrors -and $parseErrors.Count -gt 0) {
+        throw (($parseErrors | ForEach-Object Message) -join '; ')
+    }
+
+    $content = Get-Content -LiteralPath $updater -Raw -Encoding UTF8
+    $versionMatch = [regex]::Match(
+        $content,
+        '(?m)^\s*\$UpdaterVersion\s*=\s*''(?<version>\d+(?:\.\d+){2,3})''\s*$'
+    )
+    if (-not $versionMatch.Success -or $versionMatch.Groups['version'].Value -ne [string]$manifest.updaterVersion) {
+        throw 'The downloaded updater version does not match the manifest.'
+    }
+
+    $firstLine = Get-Content -LiteralPath $updater -TotalCount 1 -Encoding UTF8
+    if ($firstLine -notmatch '^#requires\s+-Version\s+5\.1') {
+        throw 'The downloaded updater does not declare Windows PowerShell 5.1.'
+    }
+
+    Unblock-File -LiteralPath $updater
+    & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+        -NoProfile `
+        -ExecutionPolicy Bypass `
+        -File $updater `
+        -Mode InstallTask
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Updater installation returned exit code $LASTEXITCODE."
+    }
+} finally {
+    Remove-Item -LiteralPath $updater -Force -ErrorAction SilentlyContinue
+}
+```
+
+### Update policy
+
+The scheduled task automatically accepts a newer installer within the same major version, such as `1.3.2` to `1.4.0`. A major-version update, such as `1.x` to `2.x`, is recorded as requiring administrator review and is not installed unless `-Force` is used. A downgrade requires `-AllowDowngrade`; a major-version downgrade requires both `-AllowDowngrade` and `-Force`.
+
+A local protected script whose embedded version cannot be read is not replaced automatically. A same-version SHA-256 mismatch is also treated as suspicious rather than repaired silently. In either case, an administrator must inspect the file and use `-Force` to approve replacement.
+
+### Check without installing an update
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File 'C:\ProgramData\SchoolQuizKiosk\Update-SchoolQuizKiosk.ps1' `
+    -Mode Check
+```
+
+### Update the protected script immediately
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File 'C:\ProgramData\SchoolQuizKiosk\Update-SchoolQuizKiosk.ps1' `
+    -Mode Update
+```
+
+For a reviewed major-version update:
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File 'C:\ProgramData\SchoolQuizKiosk\Update-SchoolQuizKiosk.ps1' `
+    -Mode Update `
+    -Force
+```
+
+### Show updater status
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File 'C:\ProgramData\SchoolQuizKiosk\Update-SchoolQuizKiosk.ps1' `
+    -Mode Status
+```
+
+### Remove the updater task
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -NoProfile `
+    -ExecutionPolicy Bypass `
+    -File 'C:\ProgramData\SchoolQuizKiosk\Update-SchoolQuizKiosk.ps1' `
+    -Mode RemoveTask
+```
+
+Updater records are stored under:
+
+```text
+C:\ProgramData\SchoolQuizKiosk\Updater.log
+C:\ProgramData\SchoolQuizKiosk\UpdaterState.json
+C:\ProgramData\SchoolQuizKiosk\Updates\
+```
+
+The `Updates` folder keeps the newest five backups by default.
+
+### Update the updater itself
+
+The updater intentionally does not replace its own running file automatically. To install a reviewed newer updater:
+
+1. Wait for the workflow to publish the new `updaterVersion`, `updaterUrl`, and `updaterSha256` values.
+2. Test the new updater on one computer using the verified GitHub installation command above.
+3. Running the new file with `-Mode InstallTask` replaces the installed updater copy and re-registers the scheduled task.
+4. Repeat on the remaining computers after the test succeeds.
+
+### Publish a new installer version
+
+1. Edit `setup.ps1`.
+2. Increase `$KioskVersion`; never publish different content under an existing version.
+3. Commit and push the change to `main`.
+4. Wait for **Update kiosk manifest** to finish successfully.
+5. Review the generated installer version, source commit, URL, and SHA-256 in `update.json`.
+6. Check or update the test desktop first.
+7. Allow the remaining computers to receive the tested same-major-version script at their next scheduled check.
+
+The workflow rejects a changed installer hash unless `$KioskVersion` was increased. It applies the same rule to `$UpdaterVersion` when the updater file changes.
+
+### Applying configuration changes from a new installer
+
+Replacing the protected management script does not change the already-running Assigned Access profile or Chrome policies. When a new installer changes kiosk behavior:
+
+1. Test the new version on one desktop first.
+2. Leave kiosk mode with `Ctrl + Alt + Q` and sign in as Administrator.
+3. Review the change and the updater backup.
+4. Use the tested maintenance process to remove and reinstall the kiosk when the configuration change requires it.
+5. Deploy the tested configuration to the other six computers.
+
 ## What Happens After Restart
 
 After installation and restart:
@@ -145,6 +394,14 @@ Ctrl + Alt + Q
 
 Then sign in with the protected administrator account.
 
+After installation, run maintenance, diagnostics, and removal from the protected copy below so the updated version is used:
+
+```text
+C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1
+```
+
+Do not use an older copy left on the Administrator desktop. Running an old installer can overwrite the protected working copy when it starts a LocalSystem operation.
+
 Because Chrome policies are computer-wide, use Microsoft Edge for unrestricted administrator browsing while kiosk mode is installed.
 
 ## Diagnostic Mode
@@ -160,6 +417,8 @@ Unblock-File -LiteralPath $script
     -File $script `
     -Mode Diagnose
 ```
+
+Before installation, the desktop copy is appropriate. After installation, use `C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1` so diagnostics run with the latest verified management-script version.
 
 Diagnostics record:
 
@@ -190,10 +449,10 @@ Get-Content 'C:\ProgramData\SchoolQuizKiosk\Setup.log' -Tail 100
 
 ## Remove the Kiosk
 
-Sign in as Administrator and run:
+Sign in as Administrator and run the protected working copy, which may have been updated automatically:
 
 ```powershell
-$script = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Setup-SchoolQuizKiosk.ps1'
+$script = 'C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1'
 & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
     -NoProfile `
     -ExecutionPolicy Bypass `
@@ -205,7 +464,7 @@ $script = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Setup-SchoolQuizK
 One-line version:
 
 ```powershell
-$k=Join-Path ([Environment]::GetFolderPath('Desktop')) 'Setup-SchoolQuizKiosk.ps1'; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $k -Mode Remove -Restart
+$k='C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1'; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $k -Mode Remove -Restart
 ```
 
 Removal attempts to:
@@ -317,6 +576,10 @@ The script may create the following files under `C:\ProgramData\SchoolQuizKiosk`
 | `ChromePolicies-BeforeKiosk.reg` | Backup of an earlier Chrome policy registry key. |
 | `ChromePolicies-WereAbsent.marker` | Records that no earlier Chrome policy key existed. |
 | `Diagnostics-*.txt` | Timestamped diagnostic reports. |
+| `Update-SchoolQuizKiosk.ps1` | Installed updater used by the scheduled task. |
+| `Updater.log` | Updater checks, downloads, validation, and error log. |
+| `UpdaterState.json` | Last installed and available version/hash status. |
+| `Updates\*.backup.ps1` | Rotating backups of earlier management-script versions. |
 
 Do not manually modify or remove these files while the kiosk is active.
 
@@ -324,16 +587,19 @@ Do not manually modify or remove these files while the kiosk is active.
 
 A practical rollout process is:
 
-1. Put `Setup-SchoolQuizKiosk.ps1` and this `README.md` on a USB drive or shared administrator folder.
-2. On the first computer, copy the script to the Administrator desktop.
-3. Run `-Mode Diagnose`.
-4. Review the diagnostic report for the Assigned Access provider.
-5. Run `-Mode Install -Restart`.
-6. Complete a real student quiz from start to submission.
-7. Confirm that `Ctrl + Alt + Q` returns to administrator maintenance.
-8. Confirm that removal works on the test computer, then reinstall it.
-9. Repeat the same tested procedure on the remaining six computers.
-10. Keep one protected copy of the script and document where the administrator credentials are stored.
+1. Download or rename the repository file `setup.ps1` as `Setup-SchoolQuizKiosk.ps1` for the Administrator desktop.
+2. Put the installer, `Update-SchoolQuizKiosk.ps1`, and this `README.md` on a USB drive or protected administrator share.
+3. On the first computer, copy the installer to the Administrator desktop.
+4. Run `-Mode Diagnose`.
+5. Review the diagnostic report for the Assigned Access provider.
+6. Run `-Mode Install -Restart`.
+7. After a successful installation, archive or delete the desktop installer so an obsolete copy is not used for later maintenance.
+8. Complete a real student quiz from start to submission.
+9. Confirm that `Ctrl + Alt + Q` returns to administrator maintenance.
+10. Confirm that removal works on the test computer, then reinstall it.
+11. Install the updater task and verify `-Mode Status`.
+12. Repeat the same tested procedure on the remaining six computers.
+13. Keep protected recovery copies and document where the administrator credentials are stored.
 
 Use the same script version on every computer so troubleshooting and removal behavior remain consistent.
 
@@ -412,22 +678,32 @@ This script is a Windows user-interface and browser lockdown tool. It is not a r
 
 ## Script Version and Integrity
 
-Documented script version:
+The repository `update.json` file is the machine-readable source of truth for the current installer and updater versions, source URLs, and SHA-256 values. The copy in this upload package is a **bootstrap manifest** whose URLs use the `main` branch and whose `sourceCommit` value is empty. After the first successful workflow run, GitHub Actions replaces it with a manifest whose two script URLs are pinned to one exact 40-character Git commit.
 
-```text
-1.3.2
-```
+Package versions and hashes:
 
-SHA-256 for the accompanying `Setup-SchoolQuizKiosk.ps1` file:
+| File | Embedded version | SHA-256 |
+|---|---:|---|
+| `setup.ps1` | `1.3.2` | `1b2f2dc9be7f6c1aece4090000076605b44b657e8c2654ea153912de734edace` |
+| `Update-SchoolQuizKiosk.ps1` | `1.0.0` | `fae806722bca7ead9eadb71cd2ea9a2f346abd8ec70c691d6ffb664eefdecdf8` |
 
-```text
-1b2f2dc9be7f6c1aece4090000076605b44b657e8c2654ea153912de734edace
-```
-
-Verify the file with:
+Verify a local repository checkout against `update.json`:
 
 ```powershell
-(Get-FileHash '.\Setup-SchoolQuizKiosk.ps1' -Algorithm SHA256).Hash
+$manifest = Get-Content '.\update.json' -Raw | ConvertFrom-Json
+$setupHash = (Get-FileHash '.\setup.ps1' -Algorithm SHA256).Hash.ToLowerInvariant()
+$updaterHash = (Get-FileHash '.\Update-SchoolQuizKiosk.ps1' -Algorithm SHA256).Hash.ToLowerInvariant()
+
+if ($setupHash -ne ([string]$manifest.sha256).ToLowerInvariant()) {
+    throw "setup.ps1 failed verification. Expected $($manifest.sha256), received $setupHash."
+}
+if ($updaterHash -ne ([string]$manifest.updaterSha256).ToLowerInvariant()) {
+    throw "Update-SchoolQuizKiosk.ps1 failed verification. Expected $($manifest.updaterSha256), received $updaterHash."
+}
+
+"Verified setup.ps1 $($manifest.version): $setupHash"
+"Verified updater $($manifest.updaterVersion): $updaterHash"
 ```
 
-The returned hash should match the value above before the script is deployed to the computers.
+Whenever `setup.ps1` changes, increase `$KioskVersion`. Whenever `Update-SchoolQuizKiosk.ps1` changes, increase `$UpdaterVersion`. The workflow rejects changed script content when the corresponding embedded version was not increased.
+
