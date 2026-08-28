@@ -12,7 +12,7 @@ The student Start menu contains only the school apps that are available on the c
 
 Word, Excel, and PowerPoint are detected automatically. If an Office app is not installed, it is simply not shown.
 
-The Administrator account remains a normal Windows account. The script does **not** apply machine-wide Chrome URL policies, but it does add a **device-wide Windows hosts-file block** for common generative-AI websites. This block also affects Administrator browsers.
+The Administrator account remains a normal Windows account, but the kiosk applies device-wide filtering: a Windows hosts-file block for common generative-AI websites and a Chrome policy that restricts YouTube to the school channel and its approved video IDs. These restrictions also affect Administrator browsers until the kiosk is removed.
 
 ## Before Installing
 
@@ -69,7 +69,7 @@ irm https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/install.ps1 | i
 
 Approve the UAC prompt. The installer verifies the published scripts, installs the restricted student experience, installs the updater task, and schedules a restart.
 
-On an already-installed 2.x kiosk, run the same one-line installer again as Administrator to refresh the AI-site block without reinstalling Assigned Access. A restart is not required for this maintenance refresh, although open browser tabs may need to be closed and reopened.
+On an already-installed 2.x kiosk, run the same one-line installer again as Administrator to apply app mode and refresh the AI/YouTube filters without reinstalling Assigned Access. Close all Chrome windows and reopen **YSNLC Quiz App** after the update.
 
 ## Upgrading an Existing v1.x Kiosk
 
@@ -101,7 +101,11 @@ The YSNLC Quiz App shortcut opens Chrome at:
 https://quiz.ysnlc.com/
 ```
 
-Chrome opens in Incognito mode for the student session. The installer blocks common AI services—including ChatGPT, Gemini, Claude, Copilot, Perplexity, Grok, DeepSeek, Poe, and others—through a clearly marked section in the Windows hosts file.
+Chrome opens the quiz in an Incognito **app window**, removing the normal address bar and tab strip. This provides a one-page app-style experience, although Chrome does not offer a strict maximum-tab policy.
+
+The installer blocks common AI services—including ChatGPT, Gemini, Claude, Copilot, Perplexity, Grok, DeepSeek, Poe, and others—through a clearly marked section in the Windows hosts file.
+
+General YouTube navigation is blocked by a device-wide Chrome policy. The school channel `UCnO2_eea5GNawtwjJunEXVg` and its known video IDs are allowed. A daily scheduled task reads the channel's public YouTube feed, adds newly published video IDs, and retains previously approved IDs. Because the public feed contains only recent uploads, videos older than the initial approved baseline may need to be added manually if they are not already remembered.
 
 Hosts-file filtering only matches listed hostnames and cannot automatically cover every new AI site, alternate domain, VPN, proxy, or mobile hotspot. For stronger enforcement, combine the kiosk with managed DNS/firewall filtering and test the required school websites before deployment.
 
@@ -115,7 +119,7 @@ Ctrl + Alt + Del
 
 Choose **Sign out**, then sign in with the Administrator account.
 
-Administrator Chrome and File Explorer remain normal, except that the device-wide AI hosts-file block also applies to Administrator web browsers. Removing the kiosk removes only the marked SchoolQuizKiosk block and preserves other hosts-file entries.
+Administrator File Explorer remains normal. Administrator Chrome is subject to the same AI and YouTube restrictions. Removing the kiosk removes only the marked SchoolQuizKiosk hosts block, removes the YouTube refresh task, and restores the Chrome policy backup.
 
 ## Remove the Restricted Student Experience
 

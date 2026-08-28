@@ -7,7 +7,7 @@
   - Uses Windows Assigned Access restricted user experience (multi-app).
   - Auto-creates and auto-signs-in a managed standard account shown on-screen as YSNLC-Student.
   - Pins YSNLC Quiz App, Student Files, and any detected Word, Excel, and PowerPoint apps.
-  - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito window.
+  - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito app window without a tab strip.
   - File Explorer is restricted to the managed user's Downloads folder.
   - Downloads and applies YSNLC wallpaper/profile branding to the managed kiosk account.
   - Uses the same YS-Background image for the Windows lock screen and sign-in background (device-wide).
@@ -21,8 +21,8 @@
 
   IMPORTANT:
   1. This script is intended for Windows 11 Pro, Enterprise, Education, or IoT Enterprise.
-  2. This version does NOT apply computer-wide Chrome URL policies. The AI website hosts-file block is
-     device-wide, however, and therefore also applies to Administrator browsers.
+  2. The AI hosts-file block and school-only YouTube Chrome policy are device-wide and also apply
+     to Administrator browsers. Original Chrome policies are backed up for kiosk removal.
   3. Microsoft Office is not installed by this script. Word, Excel, and PowerPoint are included only when detected.
   4. Modified/stripped Windows images can be missing Assigned Access components. The script
      detects that condition and writes a diagnostic report instead of attempting an unsafe hack.
@@ -51,7 +51,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock')]
+    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock', 'YouTubePolicy')]
     [string]$Mode = 'Install',
 
     [ValidatePattern('^https://')]
@@ -84,6 +84,8 @@ $PreflightJsonPath = Join-Path $Root 'Preflight.json'
 $PreflightTextPath = Join-Path $Root 'Preflight.txt'
 $ChromePolicyBackupPath = Join-Path $Root 'ChromePolicies-BeforeKiosk.reg'
 $ChromePolicyAbsentMarker = Join-Path $Root 'ChromePolicies-WereAbsent.marker'
+$YouTubePolicyStatePath = Join-Path $Root 'YouTubePolicyState.json'
+$YouTubePolicyTaskName = 'SchoolQuizKiosk-YouTubePolicy'
 $WindowsHostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
 $AiHostsBlockStart = '# BEGIN SCHOOLQUIZKIOSK AI SITE BLOCK'
 $AiHostsBlockEnd = '# END SCHOOLQUIZKIOSK AI SITE BLOCK'
@@ -100,7 +102,18 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.2.0'
+$KioskVersion = '2.3.0'
+$SchoolYouTubeChannelId = 'UCnO2_eea5GNawtwjJunEXVg'
+$SchoolYouTubeHandle = 'ysnlc_yt'
+$SchoolYouTubeFeedUrl = "https://www.youtube.com/feeds/videos.xml?channel_id=$SchoolYouTubeChannelId"
+
+# The public YouTube feed returns only recent uploads. These verified IDs provide a baseline;
+# the daily refresh task accumulates new IDs instead of discarding previously approved videos.
+$KnownSchoolYouTubeVideoIds = @(
+    'CN2qyvA9WVI', '_hMnSAZ4SqY', 'I2iIJ1jZ7uE', 'KBTLp92O7fU', 'AL--ii9dIok',
+    '1riVwja4p8c', 'pGdFWEsK8Wo', '695R2uxlkuU', 'X63NxtpmbbU', 'w5zLlZi49Uc',
+    'Ujw7IlYMKR8', 'lb8qA4MT9-E', 'W0ub_oRIGLc', 'Aru7AEwpzG0', 'nXlbHQ9xlE0'
+)
 
 # Hosts-file matching is exact, so list both the service host and common www aliases.
 # Avoid broad vendor/CDN domains that can break Google Workspace, Microsoft 365, or unrelated sites.
@@ -442,8 +455,7 @@ function Install-KioskShortcuts {
     }
     New-Item -ItemType Directory -Path $ShortcutRoot -Force | Out-Null
 
-    $quizArgs = '--start-maximized --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --overscroll-history-navigation=0 "{0}"' -f $KioskUrl
-    New-KioskShortcut -Name 'YSNLC Quiz App' -TargetPath $ChromePath -Arguments $quizArgs -IconLocation ($ChromePath + ',0') | Out-Null
+    Set-KioskQuizShortcutAppMode -ChromePath $ChromePath -KioskUrl $KioskUrl
     New-KioskShortcut -Name 'Student Files' -TargetPath "$env:WINDIR\explorer.exe" -Arguments 'shell:Downloads' -IconLocation ("$env:WINDIR\explorer.exe,0") | Out-Null
 
     foreach ($app in $OfficeApps) {
@@ -451,6 +463,18 @@ function Install-KioskShortcuts {
     }
 
     Write-Log "Created restricted-user Start shortcuts under: $ShortcutRoot" 'OK'
+}
+
+function Set-KioskQuizShortcutAppMode {
+    param(
+        [Parameter(Mandatory = $true)][string]$ChromePath,
+        [Parameter(Mandatory = $true)][string]$KioskUrl
+    )
+
+    # App mode removes Chrome's tab strip and address bar, keeping the quiz in one app-style window.
+    $quizArgs = '--start-maximized --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --overscroll-history-navigation=0 --app="{0}"' -f $KioskUrl
+    New-KioskShortcut -Name 'YSNLC Quiz App' -TargetPath $ChromePath -Arguments $quizArgs -IconLocation ($ChromePath + ',0') | Out-Null
+    Write-Log 'Configured YSNLC Quiz App to launch Chrome in app mode without a tab strip.' 'OK'
 }
 
 function Remove-KioskShortcuts {
@@ -1222,8 +1246,8 @@ function Set-ChromeKioskPolicies {
     # "This page is blocked by your organization" outside the kiosk account. Assigned Access
     # already isolates the kiosk Windows session. Website filtering is handled by the managed
     # hosts/network filter. The hosts-file AI block is intentionally device-wide.
-    Write-Log "Chrome machine-wide URL policies are not modified. Kiosk start page: $KioskUrl" 'OK'
-    Write-Log 'Student Windows access is restricted by Assigned Access; common AI sites are blocked through the Windows hosts file.' 'OK'
+    Write-Log "Kiosk Chrome app start page: $KioskUrl" 'OK'
+    Write-Log 'Common AI sites use the Windows hosts filter; YouTube uses a device-wide Chrome URL policy.' 'OK'
 }
 
 function Get-ManagedAiHostsBlock {
@@ -1309,6 +1333,123 @@ function Update-ExistingAiSiteBlocking {
     $state | Add-Member -NotePropertyName AiSiteBlocking -NotePropertyValue 'WindowsHosts-DeviceWide' -Force
     $state | Add-Member -NotePropertyName AiSiteHostCount -NotePropertyValue ((@($AiSiteHosts | Sort-Object -Unique)).Count) -Force
     Write-JsonFile -InputObject $state -Path $StatePath
+}
+
+function Get-ApprovedSchoolYouTubeVideoIds {
+    $videoIds = New-Object System.Collections.Generic.List[string]
+    foreach ($videoId in $KnownSchoolYouTubeVideoIds) {
+        $videoIds.Add($videoId)
+    }
+
+    if (Test-Path -LiteralPath $YouTubePolicyStatePath) {
+        try {
+            $priorState = Read-JsonFile -Path $YouTubePolicyStatePath
+            $videoIdsProperty = $priorState.PSObject.Properties['VideoIds']
+            if ($videoIdsProperty) {
+                foreach ($videoId in @($videoIdsProperty.Value)) {
+                    if ([string]$videoId -match '^[A-Za-z0-9_-]{11}$') {
+                        $videoIds.Add([string]$videoId)
+                    }
+                }
+            }
+        } catch {
+            Write-Log "Previous YouTube policy state could not be read. $($_.Exception.Message)" 'WARN'
+        }
+    }
+
+    try {
+        $response = Invoke-WebRequest -Uri $SchoolYouTubeFeedUrl -UseBasicParsing -TimeoutSec 30
+        [xml]$feed = $response.Content
+        foreach ($node in @($feed.SelectNodes("//*[local-name()='videoId']"))) {
+            $videoId = [string]$node.InnerText
+            if ($videoId -match '^[A-Za-z0-9_-]{11}$') {
+                $videoIds.Add($videoId)
+            }
+        }
+        Write-Log "Refreshed approved video IDs from the school YouTube channel feed." 'OK'
+    } catch {
+        Write-Log "The school YouTube feed could not be refreshed; previously approved videos remain available. $($_.Exception.Message)" 'WARN'
+    }
+
+    return @($videoIds | Sort-Object -Unique)
+}
+
+function Set-SchoolYouTubeChromePolicies {
+    $videoIds = @(Get-ApprovedSchoolYouTubeVideoIds)
+    if ($videoIds.Count -eq 0) {
+        throw 'No approved school YouTube video IDs are available.'
+    }
+
+    Backup-ChromePolicies
+    $chromePolicyRoot = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
+    Set-RegistryList -ParentPath $chromePolicyRoot -ListName 'URLBlocklist' -Values @(
+        'youtube.com',
+        'youtu.be',
+        'youtube-nocookie.com'
+    )
+
+    $allowedUrls = New-Object System.Collections.Generic.List[string]
+    $allowedUrls.Add("youtube.com/channel/$SchoolYouTubeChannelId")
+    $allowedUrls.Add("youtube.com/@$SchoolYouTubeHandle")
+
+    # YouTube needs these same-origin resources to render an otherwise approved page.
+    foreach ($path in @('youtubei/', 's/', 'api/', 'generate_204', 'img/', 'favicon', 'iframe_api', 'player_api')) {
+        $allowedUrls.Add("youtube.com/$path")
+    }
+
+    foreach ($videoId in $videoIds) {
+        $allowedUrls.Add("youtube.com/watch?v=$videoId")
+        $allowedUrls.Add("youtube.com/embed/$videoId")
+        $allowedUrls.Add("youtube.com/shorts/$videoId")
+        $allowedUrls.Add("youtu.be/$videoId")
+        $allowedUrls.Add("youtube-nocookie.com/embed/$videoId")
+    }
+    Set-RegistryList -ParentPath $chromePolicyRoot -ListName 'URLAllowlist' -Values @($allowedUrls | Sort-Object -Unique)
+
+    Write-JsonFile -Path $YouTubePolicyStatePath -InputObject ([ordered]@{
+        ChannelId  = $SchoolYouTubeChannelId
+        ChannelUrl = "https://www.youtube.com/channel/$SchoolYouTubeChannelId"
+        VideoIds   = $videoIds
+        UpdatedAt  = (Get-Date).ToString('o')
+    })
+    Write-Log "Blocked general YouTube access and approved the school channel plus $($videoIds.Count) known videos in Chrome." 'OK'
+}
+
+function Register-SchoolYouTubePolicyTask {
+    Copy-ScriptToProgramData
+    $powerShellPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode YouTubePolicy' -f $InstalledScript
+    $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments
+    $trigger = New-ScheduledTaskTrigger -Daily -At '3:15 AM'
+    $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName $YouTubePolicyTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+    Write-Log 'Registered the daily school YouTube approved-video refresh task.' 'OK'
+}
+
+function Update-SchoolYouTubePolicy {
+    if (-not (Test-Path -LiteralPath $StatePath)) {
+        throw 'No installed YSNLC kiosk was detected. Use -Mode Install on a new computer instead.'
+    }
+    $state = Read-JsonFile -Path $StatePath
+    if (-not $state.ChromePath -or -not (Test-Path -LiteralPath ([string]$state.ChromePath))) {
+        throw 'The installed Chrome path is missing from kiosk state or no longer exists.'
+    }
+    if (-not $state.Url) {
+        throw 'The kiosk URL is missing from kiosk state.'
+    }
+
+    Set-KioskQuizShortcutAppMode -ChromePath ([string]$state.ChromePath) -KioskUrl ([string]$state.Url)
+    Set-SchoolYouTubeChromePolicies
+    Register-SchoolYouTubePolicyTask
+    $state | Add-Member -NotePropertyName ChromePolicyScope -NotePropertyValue 'MachineWide-YouTubeRestricted' -Force
+    $state | Add-Member -NotePropertyName ChromeLaunchMode -NotePropertyValue 'AppWindow-NoTabStrip' -Force
+    Write-JsonFile -InputObject $state -Path $StatePath
+}
+
+function Remove-SchoolYouTubePolicyTask {
+    Unregister-ScheduledTask -TaskName $YouTubePolicyTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $YouTubePolicyStatePath -Force -ErrorAction SilentlyContinue
 }
 
 function Restore-ChromePolicies {
@@ -2051,7 +2192,7 @@ function Invoke-KioskPreflight {
 
     $chromePolicyRoot = 'HKLM:\SOFTWARE\Policies\Google\Chrome'
     if (Test-Path -LiteralPath $chromePolicyRoot) {
-        Add-Check 'Existing Chrome computer policy' 'WARN' 'A machine-wide Chrome policy key already exists. This script will not overwrite it; existing organization policies may still affect Administrator and student Chrome.'
+        Add-Check 'Existing Chrome computer policy' 'WARN' 'A machine-wide Chrome policy key already exists. It will be backed up, and its URLBlocklist/URLAllowlist will be replaced by the school-only YouTube policy until kiosk removal.'
     } else {
         Add-Check 'Existing Chrome computer policy' 'PASS' 'No existing machine-wide Chrome policy key was detected.'
     }
@@ -2221,7 +2362,8 @@ function Install-Kiosk {
             OfficeApps                  = @($officeApps | ForEach-Object { [ordered]@{ Name = $_.Name; Path = $_.Path } })
             FileExplorerNamespace       = 'DownloadsOnly'
             ProfileId                   = $profileId
-            ChromePolicyScope           = 'None-MachineWide'
+            ChromePolicyScope           = 'MachineWide-YouTubeRestricted'
+            ChromeLaunchMode            = 'AppWindow-NoTabStrip'
             ShortcutRoot                = $ShortcutRoot
             BrandingWallpaperUrl        = $BrandingWallpaperUrl
             BrandingProfileUrl          = $BrandingProfileUrl
@@ -2240,6 +2382,9 @@ function Install-Kiosk {
 
         Set-ManagedAiHostsBlock -KioskUrl $Url
         $aiHostsBlockApplied = $true
+
+        Set-SchoolYouTubeChromePolicies
+        Register-SchoolYouTubePolicyTask
 
         if ($brandingAssetsInstalled) {
             try {
@@ -2293,6 +2438,10 @@ function Install-Kiosk {
             if ($aiHostsBlockApplied) {
                 try { Remove-ManagedAiHostsBlock } catch { Write-Log "AI-site hosts-file rollback failed: $($_.Exception.Message)" 'WARN' }
             }
+            try { Remove-SchoolYouTubePolicyTask } catch { Write-Log "YouTube policy task rollback failed: $($_.Exception.Message)" 'WARN' }
+            if ((Test-Path -LiteralPath $ChromePolicyBackupPath) -or (Test-Path -LiteralPath $ChromePolicyAbsentMarker)) {
+                try { Restore-ChromePolicies } catch { Write-Log "YouTube Chrome policy rollback failed: $($_.Exception.Message)" 'WARN' }
+            }
 
             Clear-AssignedAccessBackup
             foreach ($path in @($XmlPath, $StatePath, $SystemRequestPath, $SystemResultPath)) {
@@ -2313,6 +2462,7 @@ function Install-Kiosk {
     Write-Host 'YS-Background is also requested as the device lock-screen/sign-in background.' -ForegroundColor Green
     Write-Host 'YSNLC-Student wallpaper/profile branding is configured from the GitHub PNG files.' -ForegroundColor Green
     Write-Host 'Common AI websites are blocked device-wide through the Windows hosts file, including for Administrator browsers.' -ForegroundColor Green
+    Write-Host 'Chrome launches the quiz in app mode without a tab strip; general YouTube is blocked except the school channel and known videos.' -ForegroundColor Green
     Write-Host 'The list is a deterrent, not a guarantee; use managed DNS/firewall filtering for comprehensive coverage.' -ForegroundColor Yellow
     Write-Host 'For administrator maintenance, press Ctrl+Alt+Del, sign out of the student account, then sign in as Administrator.' -ForegroundColor Yellow
 
@@ -2346,6 +2496,7 @@ function Remove-Kiosk {
         # means a prior attempt stopped before Windows kiosk configuration was touched.
         Write-Log 'No SchoolQuizKiosk Assigned Access change marker was found; Windows kiosk configuration was left unchanged.' 'WARN'
     }
+    Remove-SchoolYouTubePolicyTask
     if ((Test-Path -LiteralPath $ChromePolicyBackupPath) -or (Test-Path -LiteralPath $ChromePolicyAbsentMarker)) {
         Restore-ChromePolicies
     }
@@ -2432,6 +2583,9 @@ try {
         }
         'AiBlock' {
             Update-ExistingAiSiteBlocking
+        }
+        'YouTubePolicy' {
+            Update-SchoolYouTubePolicy
         }
     }
 } catch {

@@ -353,6 +353,15 @@ try {
         }
         Write-Host 'AI website blocking refresh completed.' -ForegroundColor Green
 
+        Write-Host 'Applying Chrome app mode and the school-only YouTube policy...' -ForegroundColor Cyan
+        & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode YouTubePolicy
+        `$youtubePolicyExit = `$LASTEXITCODE
+        if (`$youtubePolicyExit -ne 0) {
+            Show-KioskFailureDetails
+            throw "School YouTube policy refresh returned exit code `$youtubePolicyExit."
+        }
+        Write-Host 'School-only YouTube policy refresh completed.' -ForegroundColor Green
+
         Write-Host 'Installing or repairing the automatic updater...' -ForegroundColor Cyan
         & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedUpdater -Mode InstallTask
         if (`$LASTEXITCODE -ne 0) {
