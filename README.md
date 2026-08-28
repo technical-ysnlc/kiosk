@@ -105,7 +105,7 @@ https://quiz.ysnlc.com/
 
 Chrome opens the quiz in an Incognito **app window**, removing the normal address bar and tab strip. This provides a one-page app-style experience, although Chrome does not offer a strict maximum-tab policy.
 
-The **YSNLC YouTube Channel** shortcut opens `https://www.youtube.com/channel/UCnO2_eea5GNawtwjJunEXVg` in its own Chrome app window. On an existing kiosk, the maintenance update refreshes the Assigned Access Start pins so this sixth shortcut appears after the student signs out and back in or Windows restarts.
+The **YSNLC YouTube Channel** shortcut opens `https://www.youtube.com/@ysnlc_yt/videos` in its own Chrome app window. The channel's **Videos** and **Playlists** sections are allowed, but the shortcut uses **Videos** so students can see every published upload. On an existing kiosk, the maintenance update refreshes the Assigned Access Start pins so this sixth shortcut appears after the student signs out and back in or Windows restarts.
 
 The installer blocks common AI services—including ChatGPT, Gemini, Claude, Copilot, Perplexity, Grok, DeepSeek, Poe, and others—through a clearly marked section in the Windows hosts file.
 

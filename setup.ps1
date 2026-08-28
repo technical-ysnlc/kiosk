@@ -107,6 +107,7 @@ $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/m
 $KioskVersion = '2.5.0'
 $SchoolYouTubeChannelId = 'UCnO2_eea5GNawtwjJunEXVg'
 $SchoolYouTubeHandle = 'ysnlc_yt'
+$SchoolYouTubeChannelUrl = "https://www.youtube.com/@$SchoolYouTubeHandle/videos"
 $SchoolYouTubeFeedUrl = "https://www.youtube.com/feeds/videos.xml?channel_id=$SchoolYouTubeChannelId"
 
 # The public YouTube feed returns only recent uploads. These verified IDs provide a baseline;
@@ -484,8 +485,7 @@ function Set-KioskQuizShortcutAppMode {
 function Set-KioskYouTubeShortcutAppMode {
     param([Parameter(Mandatory = $true)][string]$ChromePath)
 
-    $channelUrl = "https://www.youtube.com/channel/$SchoolYouTubeChannelId"
-    $youtubeArgs = '--start-maximized --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --overscroll-history-navigation=0 --app="{0}"' -f $channelUrl
+    $youtubeArgs = '--start-maximized --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --overscroll-history-navigation=0 --app="{0}"' -f $SchoolYouTubeChannelUrl
     New-KioskShortcut -Name 'YSNLC YouTube Channel' -TargetPath $ChromePath -Arguments $youtubeArgs -IconLocation ($ChromePath + ',0') | Out-Null
     Write-Log 'Configured the YSNLC YouTube Channel Chrome app shortcut.' 'OK'
 }
@@ -1509,6 +1509,8 @@ function Set-SchoolYouTubeChromePolicies {
     $allowedUrls = New-Object System.Collections.Generic.List[string]
     $allowedUrls.Add("youtube.com/channel/$SchoolYouTubeChannelId")
     $allowedUrls.Add("youtube.com/@$SchoolYouTubeHandle")
+    $allowedUrls.Add("youtube.com/@$SchoolYouTubeHandle/videos")
+    $allowedUrls.Add("youtube.com/@$SchoolYouTubeHandle/playlists")
 
     # YouTube needs these same-origin resources to render an otherwise approved page.
     foreach ($path in @('youtubei/', 's/', 'api/', 'generate_204', 'img/', 'favicon', 'iframe_api', 'player_api')) {
@@ -1526,7 +1528,7 @@ function Set-SchoolYouTubeChromePolicies {
 
     Write-JsonFile -Path $YouTubePolicyStatePath -InputObject ([ordered]@{
         ChannelId  = $SchoolYouTubeChannelId
-        ChannelUrl = "https://www.youtube.com/channel/$SchoolYouTubeChannelId"
+        ChannelUrl = $SchoolYouTubeChannelUrl
         VideoIds   = $videoIds
         UpdatedAt  = (Get-Date).ToString('o')
     })
