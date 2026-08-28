@@ -12,7 +12,7 @@ The student Start menu contains only the school apps that are available on the c
 
 Word, Excel, and PowerPoint are detected automatically. If an Office app is not installed, it is simply not shown.
 
-The Administrator account remains a normal Windows account. The script does **not** apply machine-wide Chrome URL blocking. Use the existing hosts/network blocker for website filtering.
+The Administrator account remains a normal Windows account. The script does **not** apply machine-wide Chrome URL policies, but it does add a **device-wide Windows hosts-file block** for common generative-AI websites. This block also affects Administrator browsers.
 
 ## Before Installing
 
@@ -69,6 +69,8 @@ irm https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/install.ps1 | i
 
 Approve the UAC prompt. The installer verifies the published scripts, installs the restricted student experience, installs the updater task, and schedules a restart.
 
+On an already-installed 2.x kiosk, run the same one-line installer again as Administrator to refresh the AI-site block without reinstalling Assigned Access. A restart is not required for this maintenance refresh, although open browser tabs may need to be closed and reopened.
+
 ## Upgrading an Existing v1.x Kiosk
 
 Version 2.0 changes from a single-app kiosk to a multi-app restricted student experience, so it is intentionally **not applied automatically** over an active v1.x kiosk.
@@ -99,7 +101,9 @@ The YSNLC Quiz App shortcut opens Chrome at:
 https://quiz.ysnlc.com/
 ```
 
-Chrome opens in Incognito mode for the student session. Website access is controlled by your hosts/network filtering, not by machine-wide Chrome policies.
+Chrome opens in Incognito mode for the student session. The installer blocks common AI services—including ChatGPT, Gemini, Claude, Copilot, Perplexity, Grok, DeepSeek, Poe, and others—through a clearly marked section in the Windows hosts file.
+
+Hosts-file filtering only matches listed hostnames and cannot automatically cover every new AI site, alternate domain, VPN, proxy, or mobile hotspot. For stronger enforcement, combine the kiosk with managed DNS/firewall filtering and test the required school websites before deployment.
 
 ## Administrator Maintenance
 
@@ -111,7 +115,7 @@ Ctrl + Alt + Del
 
 Choose **Sign out**, then sign in with the Administrator account.
 
-Administrator Chrome and File Explorer remain normal.
+Administrator Chrome and File Explorer remain normal, except that the device-wide AI hosts-file block also applies to Administrator web browsers. Removing the kiosk removes only the marked SchoolQuizKiosk block and preserves other hosts-file entries.
 
 ## Remove the Restricted Student Experience
 

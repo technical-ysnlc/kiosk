@@ -344,6 +344,15 @@ try {
             Write-Host 'Kiosk branding refresh completed.' -ForegroundColor Green
         }
 
+        Write-Host 'Refreshing the device-wide AI website block...' -ForegroundColor Cyan
+        & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode AiBlock
+        `$aiBlockExit = `$LASTEXITCODE
+        if (`$aiBlockExit -ne 0) {
+            Show-KioskFailureDetails
+            throw "AI website blocking refresh returned exit code `$aiBlockExit."
+        }
+        Write-Host 'AI website blocking refresh completed.' -ForegroundColor Green
+
         Write-Host 'Installing or repairing the automatic updater...' -ForegroundColor Cyan
         & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedUpdater -Mode InstallTask
         if (`$LASTEXITCODE -ne 0) {

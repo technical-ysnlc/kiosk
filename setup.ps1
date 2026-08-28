@@ -11,7 +11,7 @@
   - File Explorer is restricted to the managed user's Downloads folder.
   - Downloads and applies YSNLC wallpaper/profile branding to the managed kiosk account.
   - Uses the same YS-Background image for the Windows lock screen and sign-in background (device-wide).
-  - Chrome website filtering is left to your existing hosts/network filter.
+  - Adds a managed Windows hosts-file block for common generative-AI websites.
   - Runs the Assigned Access MDM Bridge portion as LocalSystem by using a temporary scheduled task.
   - Reversibly disables the pre-existing standard account named YSNLC by default, so it
     cannot remain an unrestricted route to the desktop.
@@ -21,12 +21,13 @@
 
   IMPORTANT:
   1. This script is intended for Windows 11 Pro, Enterprise, Education, or IoT Enterprise.
-  2. This version does NOT apply computer-wide Chrome URL policies. Administrator Chrome remains unrestricted.
+  2. This version does NOT apply computer-wide Chrome URL policies. The AI website hosts-file block is
+     device-wide, however, and therefore also applies to Administrator browsers.
   3. Microsoft Office is not installed by this script. Word, Excel, and PowerPoint are included only when detected.
   4. Modified/stripped Windows images can be missing Assigned Access components. The script
      detects that condition and writes a diagnostic report instead of attempting an unsafe hack.
-  5. Website filtering is intentionally not enforced by this script. Use your hosts/network filtering
-     if students must be prevented from visiting unrelated sites. Test the complete workflow on one computer first.
+  5. The included AI-site list covers common services but cannot guarantee every current or future AI site.
+     For comprehensive filtering, also use a managed DNS/firewall product. Test the complete workflow on one computer first.
   6. Set a strong password on every administrator account before using the workstation.
   7. Branding images are downloaded from this repository. Branding failure does not weaken kiosk restrictions.
   8. Lock-screen/sign-in branding is device-wide, so the same background can also appear when an Administrator locks or signs in.
@@ -50,7 +51,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding')]
+    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock')]
     [string]$Mode = 'Install',
 
     [ValidatePattern('^https://')]
@@ -83,6 +84,9 @@ $PreflightJsonPath = Join-Path $Root 'Preflight.json'
 $PreflightTextPath = Join-Path $Root 'Preflight.txt'
 $ChromePolicyBackupPath = Join-Path $Root 'ChromePolicies-BeforeKiosk.reg'
 $ChromePolicyAbsentMarker = Join-Path $Root 'ChromePolicies-WereAbsent.marker'
+$WindowsHostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
+$AiHostsBlockStart = '# BEGIN SCHOOLQUIZKIOSK AI SITE BLOCK'
+$AiHostsBlockEnd = '# END SCHOOLQUIZKIOSK AI SITE BLOCK'
 $AssignedAccessBackupPath = Join-Path $Root 'AssignedAccess-BeforeKiosk.txt'
 $AssignedAccessAbsentMarker = Join-Path $Root 'AssignedAccess-WasAbsent.marker'
 $ServiceBackupPath = Join-Path $Root 'ServiceState-BeforeKiosk.json'
@@ -96,7 +100,37 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.1.6'
+$KioskVersion = '2.2.0'
+
+# Hosts-file matching is exact, so list both the service host and common www aliases.
+# Avoid broad vendor/CDN domains that can break Google Workspace, Microsoft 365, or unrelated sites.
+$AiSiteHosts = @(
+    'chatgpt.com', 'www.chatgpt.com', 'chat.openai.com', 'platform.openai.com',
+    'gemini.google.com', 'bard.google.com', 'aistudio.google.com', 'notebooklm.google.com',
+    'claude.ai', 'www.claude.ai',
+    'copilot.microsoft.com',
+    'perplexity.ai', 'www.perplexity.ai',
+    'grok.com', 'www.grok.com',
+    'deepseek.com', 'www.deepseek.com', 'chat.deepseek.com',
+    'poe.com', 'www.poe.com',
+    'character.ai', 'www.character.ai',
+    'meta.ai', 'www.meta.ai',
+    'chat.mistral.ai',
+    'huggingface.co', 'www.huggingface.co',
+    'you.com', 'www.you.com',
+    'phind.com', 'www.phind.com',
+    'pi.ai', 'www.pi.ai',
+    'blackbox.ai', 'www.blackbox.ai',
+    'quillbot.com', 'www.quillbot.com',
+    'writesonic.com', 'www.writesonic.com', 'chatsonic.com', 'www.chatsonic.com',
+    'jasper.ai', 'www.jasper.ai',
+    'copy.ai', 'www.copy.ai',
+    'duck.ai',
+    'qwen.ai', 'www.qwen.ai', 'chat.qwen.ai',
+    'kimi.com', 'www.kimi.com',
+    'lmarena.ai', 'www.lmarena.ai',
+    'console.groq.com'
+)
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -1186,10 +1220,95 @@ function Set-ChromeKioskPolicies {
     # IMPORTANT: Do not write Chrome restrictions under HKLM here.
     # HKLM Chrome policy applies to every Windows user, including Administrator, which caused
     # "This page is blocked by your organization" outside the kiosk account. Assigned Access
-    # already isolates the kiosk Windows session. Website filtering should be handled by the
-    # existing hosts/network filter so administrator Chrome profiles remain unaffected.
+    # already isolates the kiosk Windows session. Website filtering is handled by the managed
+    # hosts/network filter. The hosts-file AI block is intentionally device-wide.
     Write-Log "Chrome machine-wide URL policies are not modified. Kiosk start page: $KioskUrl" 'OK'
-    Write-Log 'Student Windows access is restricted by Assigned Access; website filtering is delegated to the existing hosts/network filter.' 'OK'
+    Write-Log 'Student Windows access is restricted by Assigned Access; common AI sites are blocked through the Windows hosts file.' 'OK'
+}
+
+function Get-ManagedAiHostsBlock {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add($AiHostsBlockStart)
+    $lines.Add('# Device-wide. Managed by SchoolQuizKiosk; do not edit inside this section.')
+    foreach ($hostName in ($AiSiteHosts | Sort-Object -Unique)) {
+        $lines.Add(('0.0.0.0 {0}' -f $hostName))
+    }
+    $lines.Add($AiHostsBlockEnd)
+    return ($lines -join "`r`n")
+}
+
+function Remove-ManagedAiHostsBlock {
+    if (-not (Test-Path -LiteralPath $WindowsHostsPath)) {
+        Write-Log "Windows hosts file was not found: $WindowsHostsPath" 'WARN'
+        return
+    }
+
+    $content = [IO.File]::ReadAllText($WindowsHostsPath)
+    $hasStart = $content.Contains($AiHostsBlockStart)
+    $hasEnd = $content.Contains($AiHostsBlockEnd)
+    if ($hasStart -xor $hasEnd) {
+        throw 'The SchoolQuizKiosk section in the Windows hosts file is malformed; refusing to modify unrelated entries.'
+    }
+    if (-not $hasStart) {
+        return
+    }
+
+    $pattern = '(?ms)^' + [regex]::Escape($AiHostsBlockStart) + '.*?^' + [regex]::Escape($AiHostsBlockEnd) + '(?:\r?\n)?'
+    $updated = [regex]::Replace($content, $pattern, '')
+    [IO.File]::WriteAllText($WindowsHostsPath, $updated, (New-Object System.Text.UTF8Encoding($false)))
+    & "$env:SystemRoot\System32\ipconfig.exe" /flushdns *> $null
+    Write-Log 'Removed the managed AI-site block from the Windows hosts file.' 'OK'
+}
+
+function Set-ManagedAiHostsBlock {
+    param([Parameter(Mandatory = $true)][string]$KioskUrl)
+
+    if (-not (Test-Path -LiteralPath $WindowsHostsPath)) {
+        throw "Windows hosts file was not found: $WindowsHostsPath"
+    }
+
+    $kioskHost = ([Uri]$KioskUrl).Host.ToLowerInvariant()
+    if ($AiSiteHosts -contains $kioskHost) {
+        throw "The kiosk URL host '$kioskHost' is present in the AI-site block list."
+    }
+
+    $content = [IO.File]::ReadAllText($WindowsHostsPath)
+    $hasStart = $content.Contains($AiHostsBlockStart)
+    $hasEnd = $content.Contains($AiHostsBlockEnd)
+    if ($hasStart -xor $hasEnd) {
+        throw 'The SchoolQuizKiosk section in the Windows hosts file is malformed; refusing to modify unrelated entries.'
+    }
+    if ($hasStart) {
+        $pattern = '(?ms)^' + [regex]::Escape($AiHostsBlockStart) + '.*?^' + [regex]::Escape($AiHostsBlockEnd) + '(?:\r?\n)?'
+        $content = [regex]::Replace($content, $pattern, '')
+    }
+
+    $prefix = $content -replace '[\r\n]+$', ''
+    if ($prefix.Length -gt 0) {
+        $prefix += "`r`n`r`n"
+    }
+    $updated = $prefix + (Get-ManagedAiHostsBlock) + "`r`n"
+    [IO.File]::WriteAllText($WindowsHostsPath, $updated, (New-Object System.Text.UTF8Encoding($false)))
+    & "$env:SystemRoot\System32\ipconfig.exe" /flushdns *> $null
+    $blockedCount = (@($AiSiteHosts | Sort-Object -Unique)).Count
+    Write-Log "Blocked $blockedCount common AI website hostnames device-wide through the Windows hosts file." 'OK'
+}
+
+function Update-ExistingAiSiteBlocking {
+    if (-not (Test-Path -LiteralPath $StatePath)) {
+        throw 'No installed YSNLC kiosk was detected. Use -Mode Install on a new computer instead of -Mode AiBlock.'
+    }
+
+    $state = Read-JsonFile -Path $StatePath
+    $kioskUrl = $Url
+    if ($state.Url -and -not [string]::IsNullOrWhiteSpace([string]$state.Url)) {
+        $kioskUrl = [string]$state.Url
+    }
+
+    Set-ManagedAiHostsBlock -KioskUrl $kioskUrl
+    $state | Add-Member -NotePropertyName AiSiteBlocking -NotePropertyValue 'WindowsHosts-DeviceWide' -Force
+    $state | Add-Member -NotePropertyName AiSiteHostCount -NotePropertyValue ((@($AiSiteHosts | Sort-Object -Unique)).Count) -Force
+    Write-JsonFile -InputObject $state -Path $StatePath
 }
 
 function Restore-ChromePolicies {
@@ -1456,6 +1575,17 @@ function Write-DiagnosticReport {
     $lines.Add(('Build: {0}.{1}' -f $info.CurrentBuild, $info.UBR))
     $lines.Add(('UAC EnableLUA: {0}' -f $uac))
     $lines.Add(('Chrome: {0}' -f $(if ($chrome) { $chrome } else { 'Not found' })))
+    if (Test-Path -LiteralPath $WindowsHostsPath) {
+        try {
+            $hostsContent = [IO.File]::ReadAllText($WindowsHostsPath)
+            $hostsStatus = if ($hostsContent.Contains($AiHostsBlockStart) -and $hostsContent.Contains($AiHostsBlockEnd)) { 'Managed block present' } else { 'Managed block absent' }
+            $lines.Add(('AI website hosts-file filter: {0}; configured hostnames: {1}' -f $hostsStatus, (@($AiSiteHosts | Sort-Object -Unique)).Count))
+        } catch {
+            $lines.Add(('AI website hosts-file filter: Unreadable - {0}' -f $_.Exception.Message))
+        }
+    } else {
+        $lines.Add('AI website hosts-file filter: Windows hosts file missing')
+    }
     foreach ($officeName in @('Microsoft Word','Microsoft Excel','Microsoft PowerPoint')) {
         $office = $officeApps | Where-Object Name -eq $officeName | Select-Object -First 1
         $lines.Add(('{0}: {1}' -f $officeName, $(if ($office) { [string]$office.Path } else { 'Not found' })))
@@ -1926,6 +2056,23 @@ function Invoke-KioskPreflight {
         Add-Check 'Existing Chrome computer policy' 'PASS' 'No existing machine-wide Chrome policy key was detected.'
     }
 
+    if (-not (Test-Path -LiteralPath $WindowsHostsPath)) {
+        Add-Check 'Windows hosts file' 'FAIL' "Required file was not found: $WindowsHostsPath"
+    } else {
+        try {
+            $hostsContent = [IO.File]::ReadAllText($WindowsHostsPath)
+            $hasStart = $hostsContent.Contains($AiHostsBlockStart)
+            $hasEnd = $hostsContent.Contains($AiHostsBlockEnd)
+            if ($hasStart -xor $hasEnd) {
+                Add-Check 'Windows hosts file' 'FAIL' 'A malformed SchoolQuizKiosk AI block marker was found. Repair or remove the marked section before installing.'
+            } else {
+                Add-Check 'Windows hosts file' 'PASS' 'The hosts file is available and its managed AI block markers are consistent.'
+            }
+        } catch {
+            Add-Check 'Windows hosts file' 'FAIL' $_.Exception.Message
+        }
+    }
+
     $canInstall = (@($checks | Where-Object Status -eq 'FAIL').Count -eq 0)
     $result = [pscustomobject]@{
         Version = $KioskVersion
@@ -2029,6 +2176,7 @@ function Install-Kiosk {
     $shortcutsCreated = $false
     $servicesChanged = $false
     $brandingAssetsInstalled = $false
+    $aiHostsBlockApplied = $false
     $disabledUserInfo = [pscustomobject]@{
         Name       = $null
         WasEnabled = $false
@@ -2079,6 +2227,8 @@ function Install-Kiosk {
             BrandingProfileUrl          = $BrandingProfileUrl
             BrandingRoot                = $BrandingRoot
             BrandingLockScreenScope     = 'DeviceWide'
+            AiSiteBlocking              = 'WindowsHosts-DeviceWide'
+            AiSiteHostCount             = (@($AiSiteHosts | Sort-Object -Unique)).Count
             DisabledLocalUserName       = $disabledUserInfo.Name
             DisabledLocalUserWasEnabled = $disabledUserInfo.WasEnabled
             InstalledAt                 = (Get-Date).ToString('o')
@@ -2087,6 +2237,9 @@ function Install-Kiosk {
 
         $assignedAccessAttempted = $true
         Invoke-SystemTask -SystemMode Install
+
+        Set-ManagedAiHostsBlock -KioskUrl $Url
+        $aiHostsBlockApplied = $true
 
         if ($brandingAssetsInstalled) {
             try {
@@ -2137,6 +2290,9 @@ function Install-Kiosk {
             if ($servicesChanged -or (Test-Path -LiteralPath $ServiceBackupPath)) {
                 try { Restore-RequiredKioskServices } catch { Write-Log "Service rollback failed: $($_.Exception.Message)" 'WARN' }
             }
+            if ($aiHostsBlockApplied) {
+                try { Remove-ManagedAiHostsBlock } catch { Write-Log "AI-site hosts-file rollback failed: $($_.Exception.Message)" 'WARN' }
+            }
 
             Clear-AssignedAccessBackup
             foreach ($path in @($XmlPath, $StatePath, $SystemRequestPath, $SystemResultPath)) {
@@ -2156,7 +2312,8 @@ function Install-Kiosk {
     Write-Host 'Student File Explorer access is restricted to Downloads.' -ForegroundColor Green
     Write-Host 'YS-Background is also requested as the device lock-screen/sign-in background.' -ForegroundColor Green
     Write-Host 'YSNLC-Student wallpaper/profile branding is configured from the GitHub PNG files.' -ForegroundColor Green
-    Write-Host 'Chrome URL policies are not applied machine-wide; Administrator Chrome remains unrestricted.' -ForegroundColor Green
+    Write-Host 'Common AI websites are blocked device-wide through the Windows hosts file, including for Administrator browsers.' -ForegroundColor Green
+    Write-Host 'The list is a deterrent, not a guarantee; use managed DNS/firewall filtering for comprehensive coverage.' -ForegroundColor Yellow
     Write-Host 'For administrator maintenance, press Ctrl+Alt+Del, sign out of the student account, then sign in as Administrator.' -ForegroundColor Yellow
 
     Complete-WithOptionalRestart -RestartRequired $true
@@ -2192,6 +2349,7 @@ function Remove-Kiosk {
     if ((Test-Path -LiteralPath $ChromePolicyBackupPath) -or (Test-Path -LiteralPath $ChromePolicyAbsentMarker)) {
         Restore-ChromePolicies
     }
+    Remove-ManagedAiHostsBlock
 
     try {
         Remove-KioskShortcuts
@@ -2271,6 +2429,9 @@ try {
             # Internal scheduled-task mode: use already-downloaded local assets only. Do not
             # require GitHub/network access every time the kiosk user signs in.
             [void](Apply-KioskBranding -ExpectedDisplayName $DisplayName -AllowDeferred)
+        }
+        'AiBlock' {
+            Update-ExistingAiSiteBlocking
         }
     }
 } catch {
