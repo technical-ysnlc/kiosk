@@ -344,6 +344,15 @@ try {
             Write-Host 'Kiosk branding refresh completed.' -ForegroundColor Green
         }
 
+        Write-Host 'Optimizing WLAN startup and the connected Wi-Fi profile...' -ForegroundColor Cyan
+        & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Wireless
+        `$wirelessExit = `$LASTEXITCODE
+        if (`$wirelessExit -ne 0) {
+            Show-KioskFailureDetails
+            throw "Wireless readiness refresh returned exit code `$wirelessExit."
+        }
+        Write-Host 'Wireless readiness refresh completed.' -ForegroundColor Green
+
         Write-Host 'Refreshing the device-wide AI website block...' -ForegroundColor Cyan
         & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode AiBlock
         `$aiBlockExit = `$LASTEXITCODE

@@ -6,12 +6,13 @@
 .DESCRIPTION
   - Uses Windows Assigned Access restricted user experience (multi-app).
   - Auto-creates and auto-signs-in a managed standard account shown on-screen as YSNLC-Student.
-  - Pins YSNLC Quiz App, Student Files, and any detected Word, Excel, and PowerPoint apps.
+  - Pins YSNLC Quiz App, YSNLC YouTube Channel, Student Files, and detected Office apps.
   - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito app window without a tab strip.
   - File Explorer is restricted to the managed user's Downloads folder.
   - Downloads and applies YSNLC wallpaper/profile branding to the managed kiosk account.
   - Uses the same YS-Background image for the Windows lock screen and sign-in background (device-wide).
   - Adds a managed Windows hosts-file block for common generative-AI websites.
+  - Enables WLAN AutoConfig and promotes the active Wi-Fi profile to all-user automatic connection.
   - Runs the Assigned Access MDM Bridge portion as LocalSystem by using a temporary scheduled task.
   - Reversibly disables the pre-existing standard account named YSNLC by default, so it
     cannot remain an unrestricted route to the desktop.
@@ -51,7 +52,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock', 'YouTubePolicy')]
+    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock', 'YouTubePolicy', 'Wireless')]
     [string]$Mode = 'Install',
 
     [ValidatePattern('^https://')]
@@ -86,6 +87,7 @@ $ChromePolicyBackupPath = Join-Path $Root 'ChromePolicies-BeforeKiosk.reg'
 $ChromePolicyAbsentMarker = Join-Path $Root 'ChromePolicies-WereAbsent.marker'
 $YouTubePolicyStatePath = Join-Path $Root 'YouTubePolicyState.json'
 $YouTubePolicyTaskName = 'SchoolQuizKiosk-YouTubePolicy'
+$WirelessStatePath = Join-Path $Root 'WirelessState-BeforeKiosk.json'
 $WindowsHostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
 $AiHostsBlockStart = '# BEGIN SCHOOLQUIZKIOSK AI SITE BLOCK'
 $AiHostsBlockEnd = '# END SCHOOLQUIZKIOSK AI SITE BLOCK'
@@ -102,7 +104,7 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.3.0'
+$KioskVersion = '2.5.0'
 $SchoolYouTubeChannelId = 'UCnO2_eea5GNawtwjJunEXVg'
 $SchoolYouTubeHandle = 'ysnlc_yt'
 $SchoolYouTubeFeedUrl = "https://www.youtube.com/feeds/videos.xml?channel_id=$SchoolYouTubeChannelId"
@@ -238,7 +240,8 @@ function Test-KioskInstallEvidence {
         $ChromePolicyAbsentMarker,
         $AssignedAccessBackupPath,
         $AssignedAccessAbsentMarker,
-        $ServiceBackupPath
+        $ServiceBackupPath,
+        $WirelessStatePath
     )) {
         if (Test-Path -LiteralPath $path) {
             return $true
@@ -456,6 +459,7 @@ function Install-KioskShortcuts {
     New-Item -ItemType Directory -Path $ShortcutRoot -Force | Out-Null
 
     Set-KioskQuizShortcutAppMode -ChromePath $ChromePath -KioskUrl $KioskUrl
+    Set-KioskYouTubeShortcutAppMode -ChromePath $ChromePath
     New-KioskShortcut -Name 'Student Files' -TargetPath "$env:WINDIR\explorer.exe" -Arguments 'shell:Downloads' -IconLocation ("$env:WINDIR\explorer.exe,0") | Out-Null
 
     foreach ($app in $OfficeApps) {
@@ -475,6 +479,15 @@ function Set-KioskQuizShortcutAppMode {
     $quizArgs = '--start-maximized --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --overscroll-history-navigation=0 --app="{0}"' -f $KioskUrl
     New-KioskShortcut -Name 'YSNLC Quiz App' -TargetPath $ChromePath -Arguments $quizArgs -IconLocation ($ChromePath + ',0') | Out-Null
     Write-Log 'Configured YSNLC Quiz App to launch Chrome in app mode without a tab strip.' 'OK'
+}
+
+function Set-KioskYouTubeShortcutAppMode {
+    param([Parameter(Mandatory = $true)][string]$ChromePath)
+
+    $channelUrl = "https://www.youtube.com/channel/$SchoolYouTubeChannelId"
+    $youtubeArgs = '--start-maximized --incognito --no-first-run --no-default-browser-check --disable-session-crashed-bubble --overscroll-history-navigation=0 --app="{0}"' -f $channelUrl
+    New-KioskShortcut -Name 'YSNLC YouTube Channel' -TargetPath $ChromePath -Arguments $youtubeArgs -IconLocation ($ChromePath + ',0') | Out-Null
+    Write-Log 'Configured the YSNLC YouTube Channel Chrome app shortcut.' 'OK'
 }
 
 function Remove-KioskShortcuts {
@@ -1155,6 +1168,111 @@ function Restore-RequiredKioskServices {
     Remove-Item -LiteralPath $ServiceBackupPath -Force -ErrorAction SilentlyContinue
 }
 
+function Get-ConnectedWirelessProfileName {
+    $netshPath = "$env:SystemRoot\System32\netsh.exe"
+    $interfaceOutput = @(& $netshPath wlan show interfaces 2>&1)
+    foreach ($line in $interfaceOutput) {
+        if ([string]$line -match '^\s*Profile\s*:\s*(.+?)\s*$') {
+            $profileName = [string]$Matches[1]
+            if (-not [string]::IsNullOrWhiteSpace($profileName)) {
+                return $profileName
+            }
+        }
+    }
+
+    # Fallback for localized netsh output. The active network name usually matches its WLAN profile.
+    $getNetConnectionProfile = Get-Command Get-NetConnectionProfile -ErrorAction SilentlyContinue
+    if ($getNetConnectionProfile) {
+        $network = Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+            Where-Object { [string]$_.IPv4Connectivity -ne 'Disconnected' -and -not [string]::IsNullOrWhiteSpace([string]$_.Name) } |
+            Select-Object -First 1
+        if ($network) {
+            return [string]$network.Name
+        }
+    }
+
+    return $null
+}
+
+function Enable-KioskWirelessReadiness {
+    $wlanService = Get-ServiceSnapshot -Name 'WlanSvc'
+    if (-not $wlanService) {
+        Write-Log 'WLAN AutoConfig (WlanSvc) is missing; USB Wi-Fi readiness could not be configured.' 'WARN'
+        return $null
+    }
+
+    if (-not (Test-Path -LiteralPath $WirelessStatePath)) {
+        Write-JsonFile -InputObject ([ordered]@{
+            ServiceName      = 'WlanSvc'
+            OriginalStartMode = $wlanService.StartMode
+            OriginalState     = $wlanService.State
+            ConfiguredAt      = (Get-Date).ToString('o')
+        }) -Path $WirelessStatePath
+    }
+
+    Set-ServiceStartupWithSc -Name 'WlanSvc' -Startup 'auto'
+    Start-Service -Name 'WlanSvc' -ErrorAction Stop
+    Write-Log 'WLAN AutoConfig is configured for automatic startup and is running.' 'OK'
+
+    $profileName = Get-ConnectedWirelessProfileName
+    if ([string]::IsNullOrWhiteSpace([string]$profileName)) {
+        Write-Log 'No currently connected Wi-Fi profile was detected. Connect as Administrator once, then rerun maintenance to enable fast kiosk auto-connect.' 'WARN'
+        return $null
+    }
+
+    $netshPath = "$env:SystemRoot\System32\netsh.exe"
+    & $netshPath wlan show profile name="$profileName" *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "Active network '$profileName' is not a WLAN profile. Connect the VENTION adapter to Wi-Fi as Administrator, then rerun maintenance." 'WARN'
+        return $null
+    }
+    & $netshPath wlan set profiletype name="$profileName" profiletype=all *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "Could not make Wi-Fi profile '$profileName' available to all Windows users." 'WARN'
+        return $null
+    }
+    & $netshPath wlan set profileparameter name="$profileName" connectionmode=auto *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log "Could not enable automatic connection for Wi-Fi profile '$profileName'." 'WARN'
+        return $null
+    }
+
+    Write-Log "Wi-Fi profile '$profileName' is available to all users and configured to connect automatically." 'OK'
+    return $profileName
+}
+
+function Restore-KioskWirelessService {
+    if (-not (Test-Path -LiteralPath $WirelessStatePath)) {
+        return
+    }
+
+    $state = Read-JsonFile -Path $WirelessStatePath
+    $startup = switch ([string]$state.OriginalStartMode) {
+        'Auto'     { 'auto' }
+        'Manual'   { 'demand' }
+        'Disabled' { 'disabled' }
+        default    { 'demand' }
+    }
+    if ([string]$state.OriginalState -eq 'Stopped') {
+        Stop-Service -Name 'WlanSvc' -Force -ErrorAction SilentlyContinue
+    }
+    Set-ServiceStartupWithSc -Name 'WlanSvc' -Startup $startup
+    Remove-Item -LiteralPath $WirelessStatePath -Force -ErrorAction SilentlyContinue
+    Write-Log "Restored WLAN AutoConfig startup to $($state.OriginalStartMode). The all-user Wi-Fi profile was retained." 'OK'
+}
+
+function Update-ExistingKioskWirelessReadiness {
+    if (-not (Test-Path -LiteralPath $StatePath)) {
+        throw 'No installed YSNLC kiosk was detected. Use -Mode Install on a new computer instead.'
+    }
+
+    $profileName = Enable-KioskWirelessReadiness
+    $state = Read-JsonFile -Path $StatePath
+    $state | Add-Member -NotePropertyName WirelessReadiness -NotePropertyValue 'WlanSvc-Automatic;AllUserAutoConnect' -Force
+    $state | Add-Member -NotePropertyName WirelessProfile -NotePropertyValue $profileName -Force
+    Write-JsonFile -InputObject $state -Path $StatePath
+}
+
 function Backup-ChromePolicies {
     if ((Test-Path -LiteralPath $ChromePolicyBackupPath) -or (Test-Path -LiteralPath $ChromePolicyAbsentMarker)) {
         Write-Log 'An original Chrome policy backup already exists; it will not be overwritten.'
@@ -1440,10 +1558,31 @@ function Update-SchoolYouTubePolicy {
     }
 
     Set-KioskQuizShortcutAppMode -ChromePath ([string]$state.ChromePath) -KioskUrl ([string]$state.Url)
+    Set-KioskYouTubeShortcutAppMode -ChromePath ([string]$state.ChromePath)
     Set-SchoolYouTubeChromePolicies
     Register-SchoolYouTubePolicyTask
+
+    $layoutProperty = $state.PSObject.Properties['YouTubeShortcutLayoutApplied']
+    if (-not $layoutProperty -or -not [bool]$layoutProperty.Value) {
+        $officeApps = @()
+        $officeProperty = $state.PSObject.Properties['OfficeApps']
+        if ($officeProperty) {
+            $officeApps = @($officeProperty.Value)
+        }
+        $xml = Build-AssignedAccessXml `
+            -ChromePath ([string]$state.ChromePath) `
+            -KioskUrl ([string]$state.Url) `
+            -KioskDisplayName ([string]$state.DisplayName) `
+            -ProfileId ([string]$state.ProfileId) `
+            -OfficeApps $officeApps
+        $xml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
+        Invoke-SystemTask -SystemMode Install
+        Write-Log 'Refreshed Assigned Access Start pins to include YSNLC YouTube Channel.' 'OK'
+    }
+
     $state | Add-Member -NotePropertyName ChromePolicyScope -NotePropertyValue 'MachineWide-YouTubeRestricted' -Force
     $state | Add-Member -NotePropertyName ChromeLaunchMode -NotePropertyValue 'AppWindow-NoTabStrip' -Force
+    $state | Add-Member -NotePropertyName YouTubeShortcutLayoutApplied -NotePropertyValue $true -Force
     Write-JsonFile -InputObject $state -Path $StatePath
 }
 
@@ -1505,6 +1644,7 @@ function Build-AssignedAccessXml {
     $pinLinks = New-Object System.Collections.Generic.List[object]
     $baseLink = '%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\YSNLC School\'
     $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + 'YSNLC Quiz App.lnk' })
+    $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + 'YSNLC YouTube Channel.lnk' })
     foreach ($app in $OfficeApps) {
         $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + ([string]$app.Name) + '.lnk' })
     }
@@ -1731,7 +1871,7 @@ function Write-DiagnosticReport {
         $office = $officeApps | Where-Object Name -eq $officeName | Select-Object -First 1
         $lines.Add(('{0}: {1}' -f $officeName, $(if ($office) { [string]$office.Path } else { 'Not found' })))
     }
-    foreach ($serviceName in @('AssignedAccessManagerSvc','AppIDSvc')) {
+    foreach ($serviceName in @('AssignedAccessManagerSvc','AppIDSvc','WlanSvc')) {
         $svc = Get-ServiceSnapshot -Name $serviceName
         if ($svc) {
             $lines.Add(('Service {0}: StartMode={1}; State={2}' -f $serviceName, $svc.StartMode, $svc.State))
@@ -2089,6 +2229,15 @@ function Invoke-KioskPreflight {
         }
     }
 
+    $wlanService = Get-ServiceSnapshot -Name 'WlanSvc'
+    if (-not $wlanService) {
+        Add-Check 'WLAN AutoConfig' 'WARN' 'WlanSvc is missing. USB Wi-Fi cannot be prepared automatically.'
+    } elseif ([string]$wlanService.StartMode -eq 'Disabled') {
+        Add-Check 'WLAN AutoConfig' 'WARN' 'WlanSvc is disabled. The installer will set it to Automatic and start it.'
+    } else {
+        Add-Check 'WLAN AutoConfig' 'PASS' "StartMode=$($wlanService.StartMode); State=$($wlanService.State)."
+    }
+
     $requiredCommands = @(
         'Get-LocalUser','Get-LocalGroup','Get-LocalGroupMember','Disable-LocalUser',
         'New-ScheduledTaskAction','New-ScheduledTaskTrigger','New-ScheduledTaskPrincipal',
@@ -2318,6 +2467,8 @@ function Install-Kiosk {
     $servicesChanged = $false
     $brandingAssetsInstalled = $false
     $aiHostsBlockApplied = $false
+    $wirelessReadinessChanged = $false
+    $wirelessProfileName = $null
     $disabledUserInfo = [pscustomobject]@{
         Name       = $null
         WasEnabled = $false
@@ -2326,6 +2477,8 @@ function Install-Kiosk {
     try {
         Ensure-RequiredKioskServices
         $servicesChanged = $true
+        $wirelessProfileName = Enable-KioskWirelessReadiness
+        $wirelessReadinessChanged = Test-Path -LiteralPath $WirelessStatePath
         Enable-AssignedAccessOperationalLog
 
         Set-ChromeKioskPolicies -KioskUrl $Url
@@ -2364,6 +2517,9 @@ function Install-Kiosk {
             ProfileId                   = $profileId
             ChromePolicyScope           = 'MachineWide-YouTubeRestricted'
             ChromeLaunchMode            = 'AppWindow-NoTabStrip'
+            YouTubeShortcutLayoutApplied = $true
+            WirelessReadiness           = 'WlanSvc-Automatic;AllUserAutoConnect'
+            WirelessProfile             = $wirelessProfileName
             ShortcutRoot                = $ShortcutRoot
             BrandingWallpaperUrl        = $BrandingWallpaperUrl
             BrandingProfileUrl          = $BrandingProfileUrl
@@ -2435,6 +2591,9 @@ function Install-Kiosk {
             if ($servicesChanged -or (Test-Path -LiteralPath $ServiceBackupPath)) {
                 try { Restore-RequiredKioskServices } catch { Write-Log "Service rollback failed: $($_.Exception.Message)" 'WARN' }
             }
+            if ($wirelessReadinessChanged -or (Test-Path -LiteralPath $WirelessStatePath)) {
+                try { Restore-KioskWirelessService } catch { Write-Log "Wireless-readiness rollback failed: $($_.Exception.Message)" 'WARN' }
+            }
             if ($aiHostsBlockApplied) {
                 try { Remove-ManagedAiHostsBlock } catch { Write-Log "AI-site hosts-file rollback failed: $($_.Exception.Message)" 'WARN' }
             }
@@ -2457,12 +2616,13 @@ function Install-Kiosk {
     Write-Log 'Restricted multi-app student experience installation is complete.' 'OK'
     Write-Host ''
     Write-Host 'IMPORTANT: Restart Windows to activate the restricted student account.' -ForegroundColor Green
-    Write-Host 'Student Start menu: YSNLC Quiz App, Student Files, plus detected Word/Excel/PowerPoint.' -ForegroundColor Green
+    Write-Host 'Student Start menu: YSNLC Quiz App, YSNLC YouTube Channel, Student Files, plus detected Office apps.' -ForegroundColor Green
     Write-Host 'Student File Explorer access is restricted to Downloads.' -ForegroundColor Green
     Write-Host 'YS-Background is also requested as the device lock-screen/sign-in background.' -ForegroundColor Green
     Write-Host 'YSNLC-Student wallpaper/profile branding is configured from the GitHub PNG files.' -ForegroundColor Green
     Write-Host 'Common AI websites are blocked device-wide through the Windows hosts file, including for Administrator browsers.' -ForegroundColor Green
     Write-Host 'Chrome launches the quiz in app mode without a tab strip; general YouTube is blocked except the school channel and known videos.' -ForegroundColor Green
+    Write-Host 'WLAN AutoConfig is enabled; the connected Wi-Fi profile is set for all-user automatic connection when detected.' -ForegroundColor Green
     Write-Host 'The list is a deterrent, not a guarantee; use managed DNS/firewall filtering for comprehensive coverage.' -ForegroundColor Yellow
     Write-Host 'For administrator maintenance, press Ctrl+Alt+Del, sign out of the student account, then sign in as Administrator.' -ForegroundColor Yellow
 
@@ -2530,6 +2690,11 @@ function Remove-Kiosk {
     } catch {
         Write-Log "Required-service settings could not be fully restored: $($_.Exception.Message)" 'WARN'
     }
+    try {
+        Restore-KioskWirelessService
+    } catch {
+        Write-Log "WLAN AutoConfig startup could not be restored: $($_.Exception.Message)" 'WARN'
+    }
     Clear-AssignedAccessBackup
 
     foreach ($path in @($XmlPath, $StatePath, $SystemRequestPath, $SystemResultPath)) {
@@ -2586,6 +2751,9 @@ try {
         }
         'YouTubePolicy' {
             Update-SchoolYouTubePolicy
+        }
+        'Wireless' {
+            Update-ExistingKioskWirelessReadiness
         }
     }
 } catch {

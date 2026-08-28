@@ -5,6 +5,7 @@ This project configures a Windows 11 school computer with a restricted student a
 The student Start menu contains only the school apps that are available on the computer:
 
 - **YSNLC Quiz App** → opens Google Chrome at `https://quiz.ysnlc.com/`
+- **YSNLC YouTube Channel** → opens the approved school channel in a Chrome app window
 - **Microsoft Word**
 - **Microsoft Excel**
 - **Microsoft PowerPoint**
@@ -20,7 +21,8 @@ The Administrator account remains a normal Windows account, but the kiosk applie
 2. Set a strong password on every Administrator account.
 3. Install Microsoft Office / Microsoft 365 first if Word, Excel, and PowerPoint are required.
 4. Make sure the computer has internet access.
-5. Test this on **one computer first** before deploying to the other six.
+5. If the computer uses Wi-Fi, connect the intended network successfully as Administrator before installing.
+6. Test this on **one computer first** before deploying to the other six.
 
 > GhostSpectre is a modified Windows build. The script repairs disabled kiosk services when possible, but it cannot restore Windows components that were completely removed.
 
@@ -103,11 +105,19 @@ https://quiz.ysnlc.com/
 
 Chrome opens the quiz in an Incognito **app window**, removing the normal address bar and tab strip. This provides a one-page app-style experience, although Chrome does not offer a strict maximum-tab policy.
 
+The **YSNLC YouTube Channel** shortcut opens `https://www.youtube.com/channel/UCnO2_eea5GNawtwjJunEXVg` in its own Chrome app window. On an existing kiosk, the maintenance update refreshes the Assigned Access Start pins so this sixth shortcut appears after the student signs out and back in or Windows restarts.
+
 The installer blocks common AI services—including ChatGPT, Gemini, Claude, Copilot, Perplexity, Grok, DeepSeek, Poe, and others—through a clearly marked section in the Windows hosts file.
 
 General YouTube navigation is blocked by a device-wide Chrome policy. The school channel `UCnO2_eea5GNawtwjJunEXVg` and its known video IDs are allowed. A daily scheduled task reads the channel's public YouTube feed, adds newly published video IDs, and retains previously approved IDs. Because the public feed contains only recent uploads, videos older than the initial approved baseline may need to be added manually if they are not already remembered.
 
 Hosts-file filtering only matches listed hostnames and cannot automatically cover every new AI site, alternate domain, VPN, proxy, or mobile hotspot. For stronger enforcement, combine the kiosk with managed DNS/firewall filtering and test the required school websites before deployment.
+
+## Wireless Readiness
+
+For USB Wi-Fi adapters such as the VENTION Wi-Fi 6 dongle, installation sets Windows WLAN AutoConfig to **Automatic** and starts it immediately. When an active Wi-Fi profile is detected, that profile is changed to **all-user** and **automatic connection**, allowing the managed kiosk account to connect without configuring the password again. The password is managed by Windows and is not written to kiosk logs or state files.
+
+Rerunning the one-line installer refreshes this wireless configuration on an existing kiosk. If no wireless profile is detected, connect to Wi-Fi once as Administrator and rerun the installer. Kiosk removal restores the original WLAN AutoConfig startup setting but retains the Windows Wi-Fi profile.
 
 ## Administrator Maintenance
 
