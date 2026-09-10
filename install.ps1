@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
   Bootstrap installer for the YSNLC School Quiz Kiosk.
@@ -24,7 +24,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$BootstrapVersion = '1.2.0'
+$BootstrapVersion = '1.2.1'
 $ManifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPath = '/technical-ysnlc/kiosk/'
@@ -108,6 +108,27 @@ function Assert-TrustedPayloadUrl {
     }
 }
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            if ($null -ne $sha256) { $sha256.Dispose() }
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Assert-PowerShellPayload {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -121,7 +142,7 @@ function Assert-PowerShellPayload {
         throw "Downloaded file size is outside the expected range: $Path ($($item.Length) bytes)."
     }
 
-    $actualSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualSha256 = Get-Sha256Hex -Path $Path
     if ($actualSha256 -cne $ExpectedSha256.ToLowerInvariant()) {
         throw "SHA-256 verification failed for $Path. Expected $ExpectedSha256, received $actualSha256."
     }
@@ -288,12 +309,33 @@ function Show-KioskFailureDetails {
     Write-Host '===== END FAILURE DETAILS =====' -ForegroundColor Red
 }
 
+function Get-Sha256Hex {
+    param([string]`$Path)
+
+    `$stream = [System.IO.File]::Open(
+        `$Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        `$sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString(`$sha256.ComputeHash(`$stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            if (`$null -ne `$sha256) { `$sha256.Dispose() }
+        }
+    } finally {
+        `$stream.Dispose()
+    }
+}
+
 function Assert-VerifiedFile {
     param([string]`$Path, [string]`$ExpectedHash)
     if (-not (Test-Path -LiteralPath `$Path)) {
         throw "Verified payload disappeared before elevation: `$Path"
     }
-    `$actual = (Get-FileHash -LiteralPath `$Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    `$actual = Get-Sha256Hex -Path `$Path
     if (`$actual -cne `$ExpectedHash) {
         throw "Payload changed after verification: `$Path"
     }

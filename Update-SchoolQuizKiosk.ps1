@@ -64,7 +64,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$UpdaterVersion = '1.0.0'
+$UpdaterVersion = '1.0.1'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPrefix = '/technical-ysnlc/kiosk/'
 $Root = Join-Path $env:ProgramData 'SchoolQuizKiosk'
@@ -351,7 +351,23 @@ function Get-UpdateManifest {
 
 function Get-Sha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            if ($null -ne $sha256) { $sha256.Dispose() }
+        }
+    } finally {
+        $stream.Dispose()
+    }
 }
 
 function Get-KioskScriptVersion {
