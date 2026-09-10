@@ -104,7 +104,7 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.5.1'
+$KioskVersion = '2.5.2'
 $SchoolYouTubeChannelId = 'UCnO2_eea5GNawtwjJunEXVg'
 $SchoolYouTubeHandle = 'ysnlc_yt'
 $SchoolYouTubeChannelUrl = "https://www.youtube.com/@$SchoolYouTubeHandle/videos"
@@ -1368,6 +1368,74 @@ function Set-ChromeKioskPolicies {
     Write-Log 'Common AI sites use the Windows hosts filter; YouTube uses a device-wide Chrome URL policy.' 'OK'
 }
 
+function Get-WindowsHostsContentSafely {
+    param(
+        [int]$MaxAttempts = 5,
+        [int]$RetryDelaySeconds = 3
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            return [IO.File]::ReadAllText($WindowsHostsPath)
+        } catch [System.IO.IOException] {
+            if ($attempt -ge $MaxAttempts) {
+                throw "The Windows hosts file remained locked while reading after $MaxAttempts attempts: $($_.Exception.Message)"
+            }
+            Write-Log "Windows hosts file is temporarily in use while reading. Retrying in $RetryDelaySeconds seconds ($attempt/$MaxAttempts)." 'WARN'
+            Start-Sleep -Seconds $RetryDelaySeconds
+        }
+    }
+}
+
+function Set-WindowsHostsContentSafely {
+    param(
+        [Parameter(Mandatory = $true)][string]$Content,
+        [int]$MaxAttempts = 5,
+        [int]$RetryDelaySeconds = 3
+    )
+
+    $stagedPath = Join-Path $env:TEMP ("SchoolQuizKiosk-hosts-{0}.tmp" -f [guid]::NewGuid().ToString('N'))
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $originalAttributes = $null
+    $attributesChanged = $false
+
+    try {
+        # Prepare the complete replacement outside the protected Windows directory first.
+        # This also avoids holding the live hosts file open while formatting the new content.
+        [IO.File]::WriteAllText($stagedPath, $Content, $utf8NoBom)
+
+        $originalAttributes = [IO.File]::GetAttributes($WindowsHostsPath)
+        $wasReadOnly = ($originalAttributes -band [IO.FileAttributes]::ReadOnly) -ne 0
+        if ($wasReadOnly) {
+            $writableAttributes = $originalAttributes -band (-bnot [IO.FileAttributes]::ReadOnly)
+            [IO.File]::SetAttributes($WindowsHostsPath, $writableAttributes)
+            $attributesChanged = $true
+        }
+
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            try {
+                Copy-Item -LiteralPath $stagedPath -Destination $WindowsHostsPath -Force -ErrorAction Stop
+                return
+            } catch [System.IO.IOException] {
+                if ($attempt -ge $MaxAttempts) {
+                    throw "The Windows hosts file remained locked after $MaxAttempts attempts: $($_.Exception.Message)"
+                }
+                Write-Log "Windows hosts file is temporarily in use. Retrying in $RetryDelaySeconds seconds ($attempt/$MaxAttempts)." 'WARN'
+                Start-Sleep -Seconds $RetryDelaySeconds
+            }
+        }
+    } finally {
+        if ($attributesChanged -and $null -ne $originalAttributes -and (Test-Path -LiteralPath $WindowsHostsPath)) {
+            try {
+                [IO.File]::SetAttributes($WindowsHostsPath, $originalAttributes)
+            } catch {
+                Write-Log "The hosts file was updated, but its original file attributes could not be restored: $($_.Exception.Message)" 'WARN'
+            }
+        }
+        Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-ManagedAiHostsBlock {
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add($AiHostsBlockStart)
@@ -1385,7 +1453,7 @@ function Remove-ManagedAiHostsBlock {
         return
     }
 
-    $content = [IO.File]::ReadAllText($WindowsHostsPath)
+    $content = Get-WindowsHostsContentSafely
     $hasStart = $content.Contains($AiHostsBlockStart)
     $hasEnd = $content.Contains($AiHostsBlockEnd)
     if ($hasStart -xor $hasEnd) {
@@ -1397,7 +1465,7 @@ function Remove-ManagedAiHostsBlock {
 
     $pattern = '(?ms)^' + [regex]::Escape($AiHostsBlockStart) + '.*?^' + [regex]::Escape($AiHostsBlockEnd) + '(?:\r?\n)?'
     $updated = [regex]::Replace($content, $pattern, '')
-    [IO.File]::WriteAllText($WindowsHostsPath, $updated, (New-Object System.Text.UTF8Encoding($false)))
+    Set-WindowsHostsContentSafely -Content $updated
     & "$env:SystemRoot\System32\ipconfig.exe" /flushdns *> $null
     Write-Log 'Removed the managed AI-site block from the Windows hosts file.' 'OK'
 }
@@ -1414,7 +1482,7 @@ function Set-ManagedAiHostsBlock {
         throw "The kiosk URL host '$kioskHost' is present in the AI-site block list."
     }
 
-    $content = [IO.File]::ReadAllText($WindowsHostsPath)
+    $content = Get-WindowsHostsContentSafely
     $hasStart = $content.Contains($AiHostsBlockStart)
     $hasEnd = $content.Contains($AiHostsBlockEnd)
     if ($hasStart -xor $hasEnd) {
@@ -1430,7 +1498,7 @@ function Set-ManagedAiHostsBlock {
         $prefix += "`r`n`r`n"
     }
     $updated = $prefix + (Get-ManagedAiHostsBlock) + "`r`n"
-    [IO.File]::WriteAllText($WindowsHostsPath, $updated, (New-Object System.Text.UTF8Encoding($false)))
+    Set-WindowsHostsContentSafely -Content $updated
     & "$env:SystemRoot\System32\ipconfig.exe" /flushdns *> $null
     $blockedCount = (@($AiSiteHosts | Sort-Object -Unique)).Count
     Write-Log "Blocked $blockedCount common AI website hostnames device-wide through the Windows hosts file." 'OK'
