@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "productId": "school-quiz-kiosk",
-  "version": "2.5.2",
-  "scriptUrl": "https://raw.githubusercontent.com/technical-ysnlc/kiosk/8095b179766a7fb5ac9bf3370aa66aeaee31e40a/setup.ps1",
-  "sha256": "675f9fce23016818495ab2d919723bf5765f4c9e18678893b9e2abd9abc7f66b",
+  "version": "2.5.3",
+  "scriptUrl": "https://raw.githubusercontent.com/technical-ysnlc/kiosk/3b38c8444700033bb79acdf8affc8f44fa48124b/setup.ps1",
+  "sha256": "0dff214651ee440f8f0891b2479ace89448376c956c1a6f1535be23d7e1efc52",
   "minimumUpdaterVersion": "1.0.0",
   "updaterVersion": "1.0.1",
-  "updaterUrl": "https://raw.githubusercontent.com/technical-ysnlc/kiosk/8095b179766a7fb5ac9bf3370aa66aeaee31e40a/Update-SchoolQuizKiosk.ps1",
+  "updaterUrl": "https://raw.githubusercontent.com/technical-ysnlc/kiosk/3b38c8444700033bb79acdf8affc8f44fa48124b/Update-SchoolQuizKiosk.ps1",
   "updaterSha256": "7a7fe06bb11368e3ea53b1a78ca8a65dd33d6796c7457c27e935fa453ee285ec",
-  "sourceCommit": "8095b179766a7fb5ac9bf3370aa66aeaee31e40a",
-  "publishedUtc": "2026-09-10T03:59:45.2834261Z"
+  "sourceCommit": "3b38c8444700033bb79acdf8affc8f44fa48124b",
+  "publishedUtc": "2026-09-10T05:05:38.1066837Z"
 }
