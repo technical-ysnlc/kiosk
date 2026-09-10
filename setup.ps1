@@ -88,9 +88,8 @@ $ChromePolicyAbsentMarker = Join-Path $Root 'ChromePolicies-WereAbsent.marker'
 $YouTubePolicyStatePath = Join-Path $Root 'YouTubePolicyState.json'
 $YouTubePolicyTaskName = 'SchoolQuizKiosk-YouTubePolicy'
 $WirelessStatePath = Join-Path $Root 'WirelessState-BeforeKiosk.json'
-$WindowsHostsPath = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
-$AiHostsBlockStart = '# BEGIN SCHOOLQUIZKIOSK AI SITE BLOCK'
-$AiHostsBlockEnd = '# END SCHOOLQUIZKIOSK AI SITE BLOCK'
+$HostBlockSitesStatePath = Join-Path $env:ProgramData 'HostBlockSites\State.json'
+$RequiredHostBlockSitesAiPolicy = 'YSNLC-AI-1'
 $AssignedAccessBackupPath = Join-Path $Root 'AssignedAccess-BeforeKiosk.txt'
 $AssignedAccessAbsentMarker = Join-Path $Root 'AssignedAccess-WasAbsent.marker'
 $ServiceBackupPath = Join-Path $Root 'ServiceState-BeforeKiosk.json'
@@ -104,7 +103,7 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.5.2'
+$KioskVersion = '2.5.3'
 $SchoolYouTubeChannelId = 'UCnO2_eea5GNawtwjJunEXVg'
 $SchoolYouTubeHandle = 'ysnlc_yt'
 $SchoolYouTubeChannelUrl = "https://www.youtube.com/@$SchoolYouTubeHandle/videos"
@@ -1362,146 +1361,43 @@ function Set-ChromeKioskPolicies {
     # IMPORTANT: Do not write Chrome restrictions under HKLM here.
     # HKLM Chrome policy applies to every Windows user, including Administrator, which caused
     # "This page is blocked by your organization" outside the kiosk account. Assigned Access
-    # already isolates the kiosk Windows session. Website filtering is handled by the managed
-    # hosts/network filter. The hosts-file AI block is intentionally device-wide.
+    # already isolates the kiosk Windows session. AI website filtering is managed independently
+    # by HostBlockSites, which is the single owner of the device-wide Windows hosts blocklist.
     Write-Log "Kiosk Chrome app start page: $KioskUrl" 'OK'
-    Write-Log 'Common AI sites use the Windows hosts filter; YouTube uses a device-wide Chrome URL policy.' 'OK'
+    Write-Log 'Common AI sites are managed by HostBlockSites; YouTube uses a device-wide Chrome URL policy.' 'OK'
 }
 
-function Get-WindowsHostsContentSafely {
-    param(
-        [int]$MaxAttempts = 5,
-        [int]$RetryDelaySeconds = 3
-    )
-
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        try {
-            return [IO.File]::ReadAllText($WindowsHostsPath)
-        } catch [System.IO.IOException] {
-            if ($attempt -ge $MaxAttempts) {
-                throw "The Windows hosts file remained locked while reading after $MaxAttempts attempts: $($_.Exception.Message)"
-            }
-            Write-Log "Windows hosts file is temporarily in use while reading. Retrying in $RetryDelaySeconds seconds ($attempt/$MaxAttempts)." 'WARN'
-            Start-Sleep -Seconds $RetryDelaySeconds
-        }
+function Get-HostBlockSitesState {
+    if (-not (Test-Path -LiteralPath $HostBlockSitesStatePath)) {
+        return $null
     }
-}
-
-function Set-WindowsHostsContentSafely {
-    param(
-        [Parameter(Mandatory = $true)][string]$Content,
-        [int]$MaxAttempts = 5,
-        [int]$RetryDelaySeconds = 3
-    )
-
-    $stagedPath = Join-Path $env:TEMP ("SchoolQuizKiosk-hosts-{0}.tmp" -f [guid]::NewGuid().ToString('N'))
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    $originalAttributes = $null
-    $attributesChanged = $false
 
     try {
-        # Prepare the complete replacement outside the protected Windows directory first.
-        # This also avoids holding the live hosts file open while formatting the new content.
-        [IO.File]::WriteAllText($stagedPath, $Content, $utf8NoBom)
-
-        $originalAttributes = [IO.File]::GetAttributes($WindowsHostsPath)
-        $wasReadOnly = ($originalAttributes -band [IO.FileAttributes]::ReadOnly) -ne 0
-        if ($wasReadOnly) {
-            $writableAttributes = $originalAttributes -band (-bnot [IO.FileAttributes]::ReadOnly)
-            [IO.File]::SetAttributes($WindowsHostsPath, $writableAttributes)
-            $attributesChanged = $true
-        }
-
-        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-            try {
-                Copy-Item -LiteralPath $stagedPath -Destination $WindowsHostsPath -Force -ErrorAction Stop
-                return
-            } catch [System.IO.IOException] {
-                if ($attempt -ge $MaxAttempts) {
-                    throw "The Windows hosts file remained locked after $MaxAttempts attempts: $($_.Exception.Message)"
-                }
-                Write-Log "Windows hosts file is temporarily in use. Retrying in $RetryDelaySeconds seconds ($attempt/$MaxAttempts)." 'WARN'
-                Start-Sleep -Seconds $RetryDelaySeconds
-            }
-        }
-    } finally {
-        if ($attributesChanged -and $null -ne $originalAttributes -and (Test-Path -LiteralPath $WindowsHostsPath)) {
-            try {
-                [IO.File]::SetAttributes($WindowsHostsPath, $originalAttributes)
-            } catch {
-                Write-Log "The hosts file was updated, but its original file attributes could not be restored: $($_.Exception.Message)" 'WARN'
-            }
-        }
-        Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
+        return Get-Content -LiteralPath $HostBlockSitesStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "HostBlockSites state could not be read: $($_.Exception.Message)"
     }
 }
 
-function Get-ManagedAiHostsBlock {
-    $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add($AiHostsBlockStart)
-    $lines.Add('# Device-wide. Managed by SchoolQuizKiosk; do not edit inside this section.')
-    foreach ($hostName in ($AiSiteHosts | Sort-Object -Unique)) {
-        $lines.Add(('0.0.0.0 {0}' -f $hostName))
+function Assert-HostBlockSitesProtection {
+    $hostBlockState = Get-HostBlockSitesState
+    if (-not $hostBlockState) {
+        throw "HostBlockSites is required before kiosk installation. Install or refresh HostBlockSites first, then rerun the kiosk installer. Expected state file: $HostBlockSitesStatePath"
     }
-    $lines.Add($AiHostsBlockEnd)
-    return ($lines -join "`r`n")
-}
-
-function Remove-ManagedAiHostsBlock {
-    if (-not (Test-Path -LiteralPath $WindowsHostsPath)) {
-        Write-Log "Windows hosts file was not found: $WindowsHostsPath" 'WARN'
-        return
+    if (-not [bool]$hostBlockState.Installed) {
+        throw 'HostBlockSites state does not report an active installation. Re-run the current HostBlockSites installer first.'
+    }
+    if ([string]$hostBlockState.KioskAiPolicyVersion -ne $RequiredHostBlockSitesAiPolicy) {
+        throw "HostBlockSites is installed, but its YSNLC AI policy is missing or outdated. Re-run the current HostBlockSites installer. Required policy: $RequiredHostBlockSitesAiPolicy"
     }
 
-    $content = Get-WindowsHostsContentSafely
-    $hasStart = $content.Contains($AiHostsBlockStart)
-    $hasEnd = $content.Contains($AiHostsBlockEnd)
-    if ($hasStart -xor $hasEnd) {
-        throw 'The SchoolQuizKiosk section in the Windows hosts file is malformed; refusing to modify unrelated entries.'
-    }
-    if (-not $hasStart) {
-        return
+    $declared = @($hostBlockState.KioskAiDomains | ForEach-Object { ([string]$_).ToLowerInvariant() })
+    $missing = @($AiSiteHosts | Where-Object { $declared -notcontains $_.ToLowerInvariant() } | Sort-Object -Unique)
+    if ($missing.Count -gt 0) {
+        throw ('HostBlockSites does not declare all kiosk AI hostnames. Re-run/update HostBlockSites. Missing: ' + ($missing -join ', '))
     }
 
-    $pattern = '(?ms)^' + [regex]::Escape($AiHostsBlockStart) + '.*?^' + [regex]::Escape($AiHostsBlockEnd) + '(?:\r?\n)?'
-    $updated = [regex]::Replace($content, $pattern, '')
-    Set-WindowsHostsContentSafely -Content $updated
-    & "$env:SystemRoot\System32\ipconfig.exe" /flushdns *> $null
-    Write-Log 'Removed the managed AI-site block from the Windows hosts file.' 'OK'
-}
-
-function Set-ManagedAiHostsBlock {
-    param([Parameter(Mandatory = $true)][string]$KioskUrl)
-
-    if (-not (Test-Path -LiteralPath $WindowsHostsPath)) {
-        throw "Windows hosts file was not found: $WindowsHostsPath"
-    }
-
-    $kioskHost = ([Uri]$KioskUrl).Host.ToLowerInvariant()
-    if ($AiSiteHosts -contains $kioskHost) {
-        throw "The kiosk URL host '$kioskHost' is present in the AI-site block list."
-    }
-
-    $content = Get-WindowsHostsContentSafely
-    $hasStart = $content.Contains($AiHostsBlockStart)
-    $hasEnd = $content.Contains($AiHostsBlockEnd)
-    if ($hasStart -xor $hasEnd) {
-        throw 'The SchoolQuizKiosk section in the Windows hosts file is malformed; refusing to modify unrelated entries.'
-    }
-    if ($hasStart) {
-        $pattern = '(?ms)^' + [regex]::Escape($AiHostsBlockStart) + '.*?^' + [regex]::Escape($AiHostsBlockEnd) + '(?:\r?\n)?'
-        $content = [regex]::Replace($content, $pattern, '')
-    }
-
-    $prefix = $content -replace '[\r\n]+$', ''
-    if ($prefix.Length -gt 0) {
-        $prefix += "`r`n`r`n"
-    }
-    $updated = $prefix + (Get-ManagedAiHostsBlock) + "`r`n"
-    Set-WindowsHostsContentSafely -Content $updated
-    & "$env:SystemRoot\System32\ipconfig.exe" /flushdns *> $null
-    $blockedCount = (@($AiSiteHosts | Sort-Object -Unique)).Count
-    Write-Log "Blocked $blockedCount common AI website hostnames device-wide through the Windows hosts file." 'OK'
+    return $hostBlockState
 }
 
 function Update-ExistingAiSiteBlocking {
@@ -1509,16 +1405,14 @@ function Update-ExistingAiSiteBlocking {
         throw 'No installed YSNLC kiosk was detected. Use -Mode Install on a new computer instead of -Mode AiBlock.'
     }
 
+    $hostBlockState = Assert-HostBlockSitesProtection
     $state = Read-JsonFile -Path $StatePath
-    $kioskUrl = $Url
-    if ($state.Url -and -not [string]::IsNullOrWhiteSpace([string]$state.Url)) {
-        $kioskUrl = [string]$state.Url
-    }
-
-    Set-ManagedAiHostsBlock -KioskUrl $kioskUrl
-    $state | Add-Member -NotePropertyName AiSiteBlocking -NotePropertyValue 'WindowsHosts-DeviceWide' -Force
+    $state | Add-Member -NotePropertyName AiSiteBlocking -NotePropertyValue 'HostBlockSites-External-DeviceWide' -Force
     $state | Add-Member -NotePropertyName AiSiteHostCount -NotePropertyValue ((@($AiSiteHosts | Sort-Object -Unique)).Count) -Force
+    $state | Add-Member -NotePropertyName HostBlockSitesVersion -NotePropertyValue ([string]$hostBlockState.Version) -Force
+    $state | Add-Member -NotePropertyName HostBlockSitesAiPolicy -NotePropertyValue ([string]$hostBlockState.KioskAiPolicyVersion) -Force
     Write-JsonFile -InputObject $state -Path $StatePath
+    Write-Log ("AI website blocking is externally managed by HostBlockSites {0}; policy {1}; declared kiosk hostnames: {2}." -f $hostBlockState.Version, $hostBlockState.KioskAiPolicyVersion, $hostBlockState.KioskAiHostCount) 'OK'
 }
 
 function Get-ApprovedSchoolYouTubeVideoIds {
@@ -1926,16 +1820,11 @@ function Write-DiagnosticReport {
     $lines.Add(('Build: {0}.{1}' -f $info.CurrentBuild, $info.UBR))
     $lines.Add(('UAC EnableLUA: {0}' -f $uac))
     $lines.Add(('Chrome: {0}' -f $(if ($chrome) { $chrome } else { 'Not found' })))
-    if (Test-Path -LiteralPath $WindowsHostsPath) {
-        try {
-            $hostsContent = [IO.File]::ReadAllText($WindowsHostsPath)
-            $hostsStatus = if ($hostsContent.Contains($AiHostsBlockStart) -and $hostsContent.Contains($AiHostsBlockEnd)) { 'Managed block present' } else { 'Managed block absent' }
-            $lines.Add(('AI website hosts-file filter: {0}; configured hostnames: {1}' -f $hostsStatus, (@($AiSiteHosts | Sort-Object -Unique)).Count))
-        } catch {
-            $lines.Add(('AI website hosts-file filter: Unreadable - {0}' -f $_.Exception.Message))
-        }
-    } else {
-        $lines.Add('AI website hosts-file filter: Windows hosts file missing')
+    try {
+        $hostBlockState = Assert-HostBlockSitesProtection
+        $lines.Add(('AI website blocking: External HostBlockSites {0}; policy {1}; declared kiosk hostnames: {2}/{3}' -f $hostBlockState.Version, $hostBlockState.KioskAiPolicyVersion, $hostBlockState.KioskAiHostCount, (@($AiSiteHosts | Sort-Object -Unique)).Count))
+    } catch {
+        $lines.Add(('AI website blocking: HostBlockSites protection unavailable - {0}' -f $_.Exception.Message))
     }
     foreach ($officeName in @('Microsoft Word','Microsoft Excel','Microsoft PowerPoint')) {
         $office = $officeApps | Where-Object Name -eq $officeName | Select-Object -First 1
@@ -2416,21 +2305,11 @@ function Invoke-KioskPreflight {
         Add-Check 'Existing Chrome computer policy' 'PASS' 'No existing machine-wide Chrome policy key was detected.'
     }
 
-    if (-not (Test-Path -LiteralPath $WindowsHostsPath)) {
-        Add-Check 'Windows hosts file' 'FAIL' "Required file was not found: $WindowsHostsPath"
-    } else {
-        try {
-            $hostsContent = [IO.File]::ReadAllText($WindowsHostsPath)
-            $hasStart = $hostsContent.Contains($AiHostsBlockStart)
-            $hasEnd = $hostsContent.Contains($AiHostsBlockEnd)
-            if ($hasStart -xor $hasEnd) {
-                Add-Check 'Windows hosts file' 'FAIL' 'A malformed SchoolQuizKiosk AI block marker was found. Repair or remove the marked section before installing.'
-            } else {
-                Add-Check 'Windows hosts file' 'PASS' 'The hosts file is available and its managed AI block markers are consistent.'
-            }
-        } catch {
-            Add-Check 'Windows hosts file' 'FAIL' $_.Exception.Message
-        }
+    try {
+        $hostBlockState = Assert-HostBlockSitesProtection
+        Add-Check 'HostBlockSites AI protection' 'PASS' ("HostBlockSites {0}; policy {1}; {2} required AI hostnames declared. The kiosk will not read or modify the Windows hosts file." -f $hostBlockState.Version, $hostBlockState.KioskAiPolicyVersion, $hostBlockState.KioskAiHostCount)
+    } catch {
+        Add-Check 'HostBlockSites AI protection' 'FAIL' $_.Exception.Message
     }
 
     $canInstall = (@($checks | Where-Object Status -eq 'FAIL').Count -eq 0)
@@ -2536,7 +2415,6 @@ function Install-Kiosk {
     $shortcutsCreated = $false
     $servicesChanged = $false
     $brandingAssetsInstalled = $false
-    $aiHostsBlockApplied = $false
     $wirelessReadinessChanged = $false
     $wirelessProfileName = $null
     $disabledUserInfo = [pscustomobject]@{
@@ -2545,6 +2423,9 @@ function Install-Kiosk {
     }
 
     try {
+        $hostBlockState = Assert-HostBlockSitesProtection
+        Write-Log ("HostBlockSites {0} verified; AI policy {1} covers {2} kiosk hostnames. The kiosk will not modify the Windows hosts file." -f $hostBlockState.Version, $hostBlockState.KioskAiPolicyVersion, $hostBlockState.KioskAiHostCount) 'OK'
+
         Ensure-RequiredKioskServices
         $servicesChanged = $true
         $wirelessProfileName = Enable-KioskWirelessReadiness
@@ -2595,8 +2476,10 @@ function Install-Kiosk {
             BrandingProfileUrl          = $BrandingProfileUrl
             BrandingRoot                = $BrandingRoot
             BrandingLockScreenScope     = 'DeviceWide'
-            AiSiteBlocking              = 'WindowsHosts-DeviceWide'
+            AiSiteBlocking              = 'HostBlockSites-External-DeviceWide'
             AiSiteHostCount             = (@($AiSiteHosts | Sort-Object -Unique)).Count
+            HostBlockSitesVersion        = [string]$hostBlockState.Version
+            HostBlockSitesAiPolicy       = [string]$hostBlockState.KioskAiPolicyVersion
             DisabledLocalUserName       = $disabledUserInfo.Name
             DisabledLocalUserWasEnabled = $disabledUserInfo.WasEnabled
             InstalledAt                 = (Get-Date).ToString('o')
@@ -2605,9 +2488,6 @@ function Install-Kiosk {
 
         $assignedAccessAttempted = $true
         Invoke-SystemTask -SystemMode Install
-
-        Set-ManagedAiHostsBlock -KioskUrl $Url
-        $aiHostsBlockApplied = $true
 
         Set-SchoolYouTubeChromePolicies
         Register-SchoolYouTubePolicyTask
@@ -2664,9 +2544,6 @@ function Install-Kiosk {
             if ($wirelessReadinessChanged -or (Test-Path -LiteralPath $WirelessStatePath)) {
                 try { Restore-KioskWirelessService } catch { Write-Log "Wireless-readiness rollback failed: $($_.Exception.Message)" 'WARN' }
             }
-            if ($aiHostsBlockApplied) {
-                try { Remove-ManagedAiHostsBlock } catch { Write-Log "AI-site hosts-file rollback failed: $($_.Exception.Message)" 'WARN' }
-            }
             try { Remove-SchoolYouTubePolicyTask } catch { Write-Log "YouTube policy task rollback failed: $($_.Exception.Message)" 'WARN' }
             if ((Test-Path -LiteralPath $ChromePolicyBackupPath) -or (Test-Path -LiteralPath $ChromePolicyAbsentMarker)) {
                 try { Restore-ChromePolicies } catch { Write-Log "YouTube Chrome policy rollback failed: $($_.Exception.Message)" 'WARN' }
@@ -2690,7 +2567,7 @@ function Install-Kiosk {
     Write-Host 'Student File Explorer access is restricted to Downloads.' -ForegroundColor Green
     Write-Host 'YS-Background is also requested as the device lock-screen/sign-in background.' -ForegroundColor Green
     Write-Host 'YSNLC-Student wallpaper/profile branding is configured from the GitHub PNG files.' -ForegroundColor Green
-    Write-Host 'Common AI websites are blocked device-wide through the Windows hosts file, including for Administrator browsers.' -ForegroundColor Green
+    Write-Host 'Common AI websites are blocked device-wide by HostBlockSites; the kiosk does not modify the Windows hosts file.' -ForegroundColor Green
     Write-Host 'Chrome launches the quiz in app mode without a tab strip; general YouTube is blocked except the school channel and known videos.' -ForegroundColor Green
     Write-Host 'WLAN AutoConfig is enabled; the connected Wi-Fi profile is set for all-user automatic connection when detected.' -ForegroundColor Green
     Write-Host 'The list is a deterrent, not a guarantee; use managed DNS/firewall filtering for comprehensive coverage.' -ForegroundColor Yellow
@@ -2730,7 +2607,7 @@ function Remove-Kiosk {
     if ((Test-Path -LiteralPath $ChromePolicyBackupPath) -or (Test-Path -LiteralPath $ChromePolicyAbsentMarker)) {
         Restore-ChromePolicies
     }
-    Remove-ManagedAiHostsBlock
+    Write-Log 'HostBlockSites was left unchanged; website blocking is managed independently of the kiosk.' 'OK'
 
     try {
         Remove-KioskShortcuts
