@@ -6,7 +6,7 @@
 .DESCRIPTION
   - Uses Windows Assigned Access restricted user experience (multi-app).
   - Auto-creates and auto-signs-in a managed standard account shown on-screen as YSNLC-Student.
-  - Pins YSNLC Quiz App, YSNLC YouTube Channel, Student Files, and detected Office apps.
+  - Pins YSNLC Quiz App, YSNLC YouTube Channel, Student Files, detected Office apps, and the offline video when VLC is installed.
   - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito app window without a tab strip.
   - File Explorer is restricted to the managed user's Downloads folder.
   - Downloads and applies YSNLC wallpaper/profile branding to the managed kiosk account.
@@ -52,7 +52,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock', 'YouTubePolicy', 'Wireless')]
+    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock', 'YouTubePolicy', 'Wireless', 'Media')]
     [string]$Mode = 'Install',
 
     [ValidatePattern('^https://')]
@@ -103,7 +103,9 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.5.3'
+$KioskVersion = '2.5.4'
+$OfflineVideoPath = 'C:\Users\KioskUser0\Downloads\uchida-kraepelin.mp4'
+$OfflineVideoShortcutName = 'Uchida-Kraepelin'
 $SchoolYouTubeChannelId = 'UCnO2_eea5GNawtwjJunEXVg'
 $SchoolYouTubeHandle = 'ysnlc_yt'
 $SchoolYouTubeChannelUrl = "https://www.youtube.com/@$SchoolYouTubeHandle/videos"
@@ -413,6 +415,29 @@ function Get-OfficeApps {
     return @($definitions | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Path) })
 }
 
+function Get-VlcExecutable {
+    # Only use machine-wide installations, which the managed student can access.
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Select-Object -Unique) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        $candidate = Join-Path $root 'VideoLAN\VLC\vlc.exe'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $null
+}
+
+function Set-KioskOfflineVideoShortcut {
+    param([Parameter(Mandatory = $true)][string]$VlcPath)
+
+    # Launch VLC directly; no file association or student PowerShell access is needed.
+    New-KioskShortcut -Name $OfflineVideoShortcutName -TargetPath $VlcPath `
+        -Arguments ('"{0}"' -f $OfflineVideoPath) -IconLocation ($VlcPath + ',0') | Out-Null
+    if (-not (Test-Path -LiteralPath $OfflineVideoPath -PathType Leaf)) {
+        Write-Log "Offline video is not present yet. Place the MP4 at $OfflineVideoPath before using $OfflineVideoShortcutName." 'WARN'
+    }
+}
+
 function New-KioskShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -450,7 +475,8 @@ function Install-KioskShortcuts {
     param(
         [Parameter(Mandatory = $true)][string]$ChromePath,
         [Parameter(Mandatory = $true)][string]$KioskUrl,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$OfficeApps
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$OfficeApps,
+        [string]$VlcPath = ''
     )
 
     if (Test-Path -LiteralPath $ShortcutRoot) {
@@ -460,6 +486,9 @@ function Install-KioskShortcuts {
 
     Set-KioskQuizShortcutAppMode -ChromePath $ChromePath -KioskUrl $KioskUrl
     Set-KioskYouTubeShortcutAppMode -ChromePath $ChromePath
+    if (-not [string]::IsNullOrWhiteSpace($VlcPath)) {
+        Set-KioskOfflineVideoShortcut -VlcPath $VlcPath
+    }
     New-KioskShortcut -Name 'Student Files' -TargetPath "$env:WINDIR\explorer.exe" -Arguments 'shell:Downloads' -IconLocation ("$env:WINDIR\explorer.exe,0") | Out-Null
 
     foreach ($app in $OfficeApps) {
@@ -1538,7 +1567,8 @@ function Update-SchoolYouTubePolicy {
             -KioskUrl ([string]$state.Url) `
             -KioskDisplayName ([string]$state.DisplayName) `
             -ProfileId ([string]$state.ProfileId) `
-            -OfficeApps $officeApps
+            -OfficeApps $officeApps `
+            -VlcPath $(if ($state.PSObject.Properties['VlcPath']) { [string]$state.VlcPath } else { '' })
         $xml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
         Invoke-SystemTask -SystemMode Install
         Write-Log 'Refreshed Assigned Access Start pins to include YSNLC YouTube Channel.' 'OK'
@@ -1548,6 +1578,51 @@ function Update-SchoolYouTubePolicy {
     $state | Add-Member -NotePropertyName ChromeLaunchMode -NotePropertyValue 'AppWindow-NoTabStrip' -Force
     $state | Add-Member -NotePropertyName YouTubeShortcutLayoutApplied -NotePropertyValue $true -Force
     Write-JsonFile -InputObject $state -Path $StatePath
+}
+
+function Update-KioskOfflineMedia {
+    if (-not (Test-Path -LiteralPath $StatePath)) {
+        throw 'No installed YSNLC kiosk was detected. Use -Mode Install on a new computer instead.'
+    }
+    $vlc = Get-VlcExecutable
+    if (-not $vlc) {
+        Write-Log 'Offline video shortcut was not enabled: install desktop VLC for all users in Program Files\VideoLAN\VLC, then rerun -Mode Media or the one-line installer.' 'WARN'
+        return
+    }
+
+    $state = Read-JsonFile -Path $StatePath
+    foreach ($name in @('ChromePath', 'Url', 'DisplayName', 'ProfileId')) {
+        if (-not $state.PSObject.Properties[$name] -or [string]::IsNullOrWhiteSpace([string]$state.$name)) {
+            throw "Cannot update offline media: kiosk state is missing $name."
+        }
+    }
+    $officeApps = @()
+    if ($state.PSObject.Properties['OfficeApps']) { $officeApps = @($state.OfficeApps) }
+
+    Set-KioskOfflineVideoShortcut -VlcPath $vlc
+    $xml = Build-AssignedAccessXml -ChromePath ([string]$state.ChromePath) `
+        -KioskUrl ([string]$state.Url) -KioskDisplayName ([string]$state.DisplayName) `
+        -ProfileId ([string]$state.ProfileId) -OfficeApps $officeApps -VlcPath $vlc
+    $previousXml = if (Test-Path -LiteralPath $XmlPath) { Get-Content -LiteralPath $XmlPath -Raw } else { $null }
+    # Avoid reapplying Assigned Access when only the shortcut needs repair.
+    if (-not $previousXml -or $previousXml.Trim() -cne $xml.Trim()) {
+        $xml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
+        try {
+            Invoke-SystemTask -SystemMode Install
+        } catch {
+            if ($previousXml) {
+                $previousXml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
+            } else {
+                Remove-Item -LiteralPath $XmlPath -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
+    }
+    $state | Add-Member -NotePropertyName VlcPath -NotePropertyValue $vlc -Force
+    $state | Add-Member -NotePropertyName OfflineVideoPath -NotePropertyValue $OfflineVideoPath -Force
+    Write-JsonFile -InputObject $state -Path $StatePath
+    Write-Log 'Enabled the Uchida-Kraepelin shortcut and allowed VLC in Assigned Access. Sign out of the student account and sign in again, or restart Windows.' 'OK'
+    Complete-WithOptionalRestart -RestartRequired $true
 }
 
 function Remove-SchoolYouTubePolicyTask {
@@ -1589,7 +1664,8 @@ function Build-AssignedAccessXml {
         [Parameter(Mandatory = $true)][string]$KioskUrl,
         [Parameter(Mandatory = $true)][string]$KioskDisplayName,
         [Parameter(Mandatory = $true)][string]$ProfileId,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$OfficeApps
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$OfficeApps,
+        [string]$VlcPath = ''
     )
 
     $escapedChromePath = [System.Security.SecurityElement]::Escape($ChromePath)
@@ -1599,6 +1675,10 @@ function Build-AssignedAccessXml {
     $allowedApps = New-Object System.Collections.Generic.List[string]
     $allowedApps.Add(('        <App DesktopAppPath="{0}" />' -f $escapedChromePath))
     $allowedApps.Add(('        <App DesktopAppPath="{0}" />' -f $escapedExplorerPath))
+    if (-not [string]::IsNullOrWhiteSpace($VlcPath)) {
+        $escapedVlcPath = [System.Security.SecurityElement]::Escape($VlcPath)
+        $allowedApps.Add(('        <App DesktopAppPath="{0}" />' -f $escapedVlcPath))
+    }
 
     foreach ($app in $OfficeApps) {
         $escapedPath = [System.Security.SecurityElement]::Escape([string]$app.Path)
@@ -1613,6 +1693,9 @@ function Build-AssignedAccessXml {
         $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + ([string]$app.Name) + '.lnk' })
     }
     $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + 'Student Files.lnk' })
+    if (-not [string]::IsNullOrWhiteSpace($VlcPath)) {
+        $pinLinks.Add([ordered]@{ desktopAppLink = $baseLink + $OfflineVideoShortcutName + '.lnk' })
+    }
 
     # PowerShell 5.1 can throw 'Argument types do not match' when @() wraps a generic List[object].
     # Convert explicitly to a CLR array for compatibility across Windows 11 PowerShell 5.1 builds.
@@ -2402,6 +2485,10 @@ function Install-Kiosk {
     }
 
     $officeApps = @(Get-OfficeApps)
+    $vlc = Get-VlcExecutable
+    if (-not $vlc) {
+        Write-Log 'VLC was not found. Install desktop VLC for all users, then rerun the installer to enable the offline video shortcut.' 'WARN'
+    }
     foreach ($wanted in @('Microsoft Word','Microsoft Excel','Microsoft PowerPoint')) {
         $found = $officeApps | Where-Object Name -eq $wanted | Select-Object -First 1
         if ($found) {
@@ -2433,7 +2520,7 @@ function Install-Kiosk {
         Enable-AssignedAccessOperationalLog
 
         Set-ChromeKioskPolicies -KioskUrl $Url
-        Install-KioskShortcuts -ChromePath $chrome -KioskUrl $Url -OfficeApps $officeApps
+        Install-KioskShortcuts -ChromePath $chrome -KioskUrl $Url -OfficeApps $officeApps -VlcPath $vlc
         $shortcutsCreated = $true
 
         try {
@@ -2449,7 +2536,8 @@ function Install-Kiosk {
             -KioskUrl $Url `
             -KioskDisplayName $DisplayName `
             -ProfileId $profileId `
-            -OfficeApps $officeApps
+            -OfficeApps $officeApps `
+            -VlcPath $vlc
         $xml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
 
         # A normal local account named YSNLC would remain a route to an unrestricted desktop,
@@ -2463,6 +2551,8 @@ function Install-Kiosk {
             Url                         = $Url
             DisplayName                 = $DisplayName
             ChromePath                  = $chrome
+            VlcPath                     = $vlc
+            OfflineVideoPath            = $OfflineVideoPath
             OfficeApps                  = @($officeApps | ForEach-Object { [ordered]@{ Name = $_.Name; Path = $_.Path } })
             FileExplorerNamespace       = 'DownloadsOnly'
             ProfileId                   = $profileId
@@ -2701,6 +2791,9 @@ try {
         }
         'Wireless' {
             Update-ExistingKioskWirelessReadiness
+        }
+        'Media' {
+            Update-KioskOfflineMedia
         }
     }
 } catch {

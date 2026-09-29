@@ -24,7 +24,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$BootstrapVersion = '1.2.1'
+$BootstrapVersion = '1.2.2'
 $ManifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPath = '/technical-ysnlc/kiosk/'
@@ -375,7 +375,7 @@ try {
             throw 'A major kiosk upgrade requires removing the active kiosk first, restarting Windows, and then running this one-line installer again.'
         }
 
-        Write-Host 'The active kiosk Assigned Access configuration will not be reinstalled or changed.' -ForegroundColor Yellow
+        Write-Host 'Refreshing the existing kiosk, including its allowed apps and Start shortcuts when needed.' -ForegroundColor Yellow
         Write-Host 'Refreshing YSNLC-Student wallpaper and profile picture...' -ForegroundColor Cyan
         & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Branding
         `$brandingExit = `$LASTEXITCODE
@@ -413,6 +413,13 @@ try {
         }
         Write-Host 'School-only YouTube policy refresh completed.' -ForegroundColor Green
 
+        Write-Host 'Enabling the offline Uchida-Kraepelin video shortcut when VLC is installed...' -ForegroundColor Cyan
+        & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Media
+        if (`$LASTEXITCODE -ne 0) {
+            Show-KioskFailureDetails
+            throw "Offline video configuration returned exit code `$LASTEXITCODE."
+        }
+
         Write-Host 'Installing or repairing the automatic updater...' -ForegroundColor Cyan
         & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedUpdater -Mode InstallTask
         if (`$LASTEXITCODE -ne 0) {
@@ -421,12 +428,12 @@ try {
         Write-Host 'Automatic updater installation or repair completed.' -ForegroundColor Green
 
         if (`$brandingExit -ne 0) {
-            throw 'Assigned Access was left unchanged, but the wallpaper/profile branding refresh failed. Review the details above.'
+            throw 'Kiosk maintenance completed, but the wallpaper/profile branding refresh failed. Review the details above.'
         }
 
         Write-Host ''
         Write-Host 'Existing kiosk maintenance completed. No kiosk reinstall and no automatic restart were requested.' -ForegroundColor Green
-        Write-Host 'If YSNLC-Student is currently signed in, sign out/in or restart Windows to refresh the visible wallpaper/profile picture.' -ForegroundColor Yellow
+        Write-Host 'Sign out/in as the student or restart Windows to refresh the allowed apps, Start shortcuts, and branding.' -ForegroundColor Yellow
         exit 0
     }
 

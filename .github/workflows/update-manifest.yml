@@ -8,6 +8,7 @@ on:
       - setup.ps1
       - Update-SchoolQuizKiosk.ps1
       - install.ps1
+      - tests/OfflineMedia.Tests.ps1
       - .github/workflows/update-manifest.yml
   workflow_dispatch:
 
@@ -19,7 +20,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Test offline media with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/OfflineMedia.Tests.ps1
+
   build-manifest:
+    needs: test-windows
     runs-on: ubuntu-latest
 
     steps:

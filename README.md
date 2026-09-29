@@ -10,6 +10,7 @@ The student Start menu contains only the school apps that are available on the c
 - **Microsoft Excel**
 - **Microsoft PowerPoint**
 - **Student Files** → opens the student's **Downloads** folder
+- **Uchida-Kraepelin** → plays `C:\Users\KioskUser0\Downloads\uchida-kraepelin.mp4` in VLC (when installed)
 
 Word, Excel, and PowerPoint are detected automatically. If an Office app is not installed, it is simply not shown.
 
@@ -59,7 +60,7 @@ Do **not** manually edit `update.json`. GitHub Actions generates it.
 2. Commit them to `main`.
 3. Open **GitHub → Actions**.
 4. Wait for **Update kiosk manifest** to finish successfully.
-5. Confirm `update.json` shows version `2.0.0` and a 40-character `sourceCommit`.
+5. Confirm `update.json` shows version `2.5.4` and a 40-character `sourceCommit`.
 
 ## Fresh Installation
 
@@ -71,7 +72,30 @@ irm https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/install.ps1 | i
 
 Approve the UAC prompt. The installer verifies the published scripts, installs the restricted student experience, installs the updater task, and schedules a restart.
 
-On an already-installed 2.x kiosk, run the same one-line installer again as Administrator to apply app mode and refresh the AI/YouTube filters without reinstalling Assigned Access. Close all Chrome windows and reopen **YSNLC Quiz App** after the update.
+On an already-installed 2.x kiosk, run the same one-line installer again as Administrator to apply app mode, refresh the AI/YouTube filters, and enable offline VLC playback when VLC is installed. It updates Assigned Access allowed apps and Start pins when needed. Sign out and back in as the student, or restart Windows, after the update.
+
+## Offline Uchida-Kraepelin Video
+
+1. Install the desktop version of VLC for **all users** as Administrator. The script detects `vlc.exe` in `C:\Program Files\VideoLAN\VLC` or `C:\Program Files (x86)\VideoLAN\VLC`. VLC is not downloaded or installed by these scripts.
+2. Put the video at exactly `C:\Users\KioskUser0\Downloads\uchida-kraepelin.mp4`. The scripts do not download, move, or delete the video. If the file is missing during setup, they create the shortcut and log a warning so you can add the video later.
+3. After publishing version 2.5.4 and waiting for the manifest workflow to finish, rerun the one-line installer above as Administrator. New installations also include the shortcut when VLC is detected.
+4. Sign out and back in as the student, or restart Windows. Open **Uchida-Kraepelin** from Start to play the local file offline.
+
+The shortcut targets VLC directly with the quoted MP4 path as its argument, so changing Windows' default `.mp4` app is unnecessary. VLC is added to the kiosk's allowed apps. This allows the VLC application, not just this one file. The existing Downloads-only File Explorer restriction is retained.
+
+To apply only the media change with a locally downloaded copy of the updated `setup.ps1`, open PowerShell in that file's folder as Administrator and run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -Mode Media
+```
+
+If the automatic updater has already downloaded version 2.5.4 or later, use the installed copy:
+
+```powershell
+$k='C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1'; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $k -Mode Media
+```
+
+The automatic updater replaces the management script; it does not apply this configuration change by itself. If VLC is missing, media configuration logs a warning and leaves the existing kiosk configuration in place. Install VLC and rerun the command. The video path is intentionally fixed to `KioskUser0`, as used on these desktops; change `$OfflineVideoPath` in `setup.ps1` if the managed account's actual profile folder differs.
 
 ## Upgrading an Existing v1.x Kiosk
 
