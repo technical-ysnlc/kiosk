@@ -10,7 +10,7 @@ The student Start menu contains only the school apps that are available on the c
 - **Microsoft Excel**
 - **Microsoft PowerPoint**
 - **Student Files** → opens the student's **Downloads** folder
-- **Uchida-Kraepelin** → plays `Downloads\uchida-kraepelin.mp4` from the actual Windows-managed kiosk profile in VLC (when installed)
+- **Uchida-Kraepelin** → plays `Downloads\uchida-kraepelin.mp4` from the actual Windows-managed kiosk profile in VLC
 
 Word, Excel, and PowerPoint are detected automatically. If an Office app is not installed, it is simply not shown.
 
@@ -60,7 +60,7 @@ Do **not** manually edit `update.json`. GitHub Actions generates it.
 2. Commit them to `main`.
 3. Open **GitHub → Actions**.
 4. Wait for **Update kiosk manifest** to finish successfully.
-5. Confirm `update.json` shows version `2.6.0` and a 40-character `sourceCommit`.
+5. Confirm `update.json` shows version `2.7.0` and a 40-character `sourceCommit`.
 
 ## Fresh Installation
 
@@ -72,14 +72,22 @@ irm https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/install.ps1 | i
 
 Approve the UAC prompt. The installer verifies the published scripts, installs the restricted student experience, installs the updater task, and schedules a restart.
 
-On an already-installed 2.x kiosk, run the same one-line installer again as Administrator to apply app mode, refresh the AI/YouTube filters, and enable offline VLC playback when VLC is installed. It updates Assigned Access allowed apps and Start pins when needed. Sign out and back in as the student, or restart Windows, after the update.
+On an already-installed 2.x kiosk, run the same one-line installer again as Administrator to apply app mode, refresh the AI/YouTube filters, install or verify VLC, download the verified offline video, and update Assigned Access when needed. Sign out and back in as the student, or restart Windows, after the update.
 
 ## Offline Uchida-Kraepelin Video
 
-1. Install the desktop version of VLC for **all users** as Administrator. The script detects `vlc.exe` in `C:\Program Files\VideoLAN\VLC` or `C:\Program Files (x86)\VideoLAN\VLC`. VLC is not downloaded or installed by these scripts.
-2. Put the video in the managed kiosk account's `Downloads` folder. This is normally `C:\Users\KioskUser0\Downloads\uchida-kraepelin.mp4`; if Windows has assigned a suffixed profile folder, diagnostics and kiosk state show the resolved path. The scripts do not download or delete the video.
-3. After publishing version 2.6.0 and waiting for the manifest workflow to finish, rerun the one-line installer above as Administrator. New installations also include the shortcut when VLC is detected.
-4. Sign out and back in as the student, or restart Windows. Open **Uchida-Kraepelin** from Start to play the local file offline.
+Version 2.7.0 configures the media automatically:
+
+1. If VLC is missing, the installer downloads the official VideoLAN 3.0.23 64-bit MSI, verifies its pinned SHA-256 checksum, and installs it for all users.
+2. After Windows creates the managed Assigned Access account, the script looks up that account by SID and asks Windows for its registered profile path.
+3. It creates that profile's `Downloads` folder if needed, downloads `uchida-kraepelin.mp4` from the YSNLC Nextcloud public share, and verifies both the exact file size and pinned SHA-256 checksum before replacing any existing copy.
+4. It creates the **Uchida-Kraepelin** shortcut using the path Windows actually returned, then allows and pins VLC in Assigned Access.
+
+There is no fixed `C:\Users\KioskUser0` path in this media workflow. If Windows chooses `KioskUser0`, `KioskUser0.YS-LAB-CPU-3`, or another profile directory—even on another drive—the MP4 and shortcut use that exact profile. A computer rename therefore does not require changing the script.
+
+The 131,249,563-byte MP4 is intentionally kept on the YSNLC Nextcloud server rather than committed to this Git repository; it exceeds GitHub's 100 MiB limit for an ordinary Git file. The installer uses the public share's direct WebDAV endpoint, not the browser preview page.
+
+After publishing version 2.7.0 and waiting for the manifest workflow to finish, run the normal one-line installer as Administrator. Sign out and back in as the student, or restart Windows. Open **Uchida-Kraepelin** from Start to play the local file offline.
 
 The shortcut targets VLC directly with the quoted MP4 path as its argument, so changing Windows' default `.mp4` app is unnecessary. VLC is added to the kiosk's allowed apps. This allows the VLC application, not just this one file. The existing Downloads-only File Explorer restriction is retained.
 
@@ -89,13 +97,13 @@ To apply only the media change with a locally downloaded copy of the updated `se
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -Mode Media
 ```
 
-If the automatic updater has already downloaded version 2.6.0 or later, use the installed copy:
+If the automatic updater has already downloaded version 2.7.0 or later, use the installed copy:
 
 ```powershell
 $k='C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1'; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $k -Mode Media
 ```
 
-The automatic updater replaces the management script; it does not apply this configuration change by itself. If VLC is missing, media configuration logs a warning and leaves the existing kiosk configuration in place. Install VLC and rerun the command. Version 2.6.0 resolves the profile directory from the kiosk account SID, so a Windows-generated suffix or later PC rename does not leave the shortcut pointing at the wrong folder.
+The automatic updater replaces the management script; it does not apply this configuration change by itself. Media mode installs or verifies VLC, downloads and verifies the MP4, and resolves the profile directory from the kiosk account SID. If the account has not materialized yet, restart Windows and rerun the one-line installer.
 
 ## Upgrading an Existing v1.x Kiosk
 
@@ -163,7 +171,7 @@ Sign in as Administrator and run:
 $k='C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1'; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $k -Mode Remove -Restart
 ```
 
-Removal retires the managed account and its Windows profile registration so a later reinstall can reuse `C:\Users\KioskUser0`. If the profile folder contains files, it is preserved under `C:\Users\SchoolQuizKiosk-Recovered` instead of being deleted.
+Removal retires the managed account and its Windows profile registration so a later reinstall can create a clean managed profile. If the old profile folder contains files, it is preserved under `C:\Users\SchoolQuizKiosk-Recovered` instead of being deleted. The new installation always uses the profile path Windows registers for the new account.
 
 ## Troubleshooting
 
@@ -171,7 +179,7 @@ Removal retires the managed account and its Windows profile registration so a la
 
 Do not manually delete `C:\Users\KioskUser0` or the `SchoolQuizKiosk` ProgramData folders. A user-profile folder is not the Windows account: the account SID and profile registration remain, and Windows may create a dotted folder such as `KioskUser0.YS-LAB-CPU-3` on the next attempt.
 
-Version 2.6.0 detects this specific orphaned YSNLC Assigned Access account during the normal one-line installation. It verifies that the account/display name and active Assigned Access configuration belong to this kiosk, preserves any old profile directory under:
+Version 2.7.0 detects this specific orphaned YSNLC Assigned Access account during the normal one-line installation. It verifies that the account/display name and active Assigned Access configuration belong to this kiosk, preserves any old profile directory under:
 
 ```text
 C:\Users\SchoolQuizKiosk-Recovered

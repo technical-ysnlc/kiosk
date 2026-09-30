@@ -413,7 +413,7 @@ try {
         }
         Write-Host 'School-only YouTube policy refresh completed.' -ForegroundColor Green
 
-        Write-Host 'Enabling the offline Uchida-Kraepelin video shortcut when VLC is installed...' -ForegroundColor Cyan
+        Write-Host 'Installing or verifying VLC and downloading the offline Uchida-Kraepelin video...' -ForegroundColor Cyan
         & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Media
         if (`$LASTEXITCODE -ne 0) {
             Show-KioskFailureDetails

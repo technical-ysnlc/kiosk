@@ -6,7 +6,9 @@
 .DESCRIPTION
   - Uses Windows Assigned Access restricted user experience (multi-app).
   - Auto-creates and auto-signs-in a managed standard account shown on-screen as YSNLC-Student.
-  - Pins YSNLC Quiz App, YSNLC YouTube Channel, Student Files, detected Office apps, and the offline video when VLC is installed.
+  - Pins YSNLC Quiz App, YSNLC YouTube Channel, Student Files, detected Office apps, and a verified offline video.
+  - Installs a checksum-pinned VLC MSI for all users when VLC is not already installed.
+  - Downloads the checksum-pinned video into the managed account's Windows-resolved Downloads folder.
   - YSNLC Quiz App launches Chrome at https://quiz.ysnlc.com/ in an Incognito app window without a tab strip.
   - File Explorer is restricted to the managed user's Downloads folder.
   - Downloads and applies YSNLC wallpaper/profile branding to the managed kiosk account.
@@ -107,8 +109,15 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.6.0'
-$OfflineVideoPath = 'C:\Users\KioskUser0\Downloads\uchida-kraepelin.mp4'
+$KioskVersion = '2.7.0'
+$OfflineVideoFileName = 'uchida-kraepelin.mp4'
+$OfflineVideoUrl = 'https://cloud.ysnlc.com/public.php/dav/files/uchida-test/'
+$OfflineVideoShareToken = 'uchida-test'
+$OfflineVideoSha256 = '0c020c466a0be396df5419d7a092b2de1c7a7cf32477b402a88b6eb57d1c80a0'
+$OfflineVideoSize = 131249563
+$VlcVersion = '3.0.23'
+$VlcMsiUrl = 'https://get.videolan.org/vlc/3.0.23/win64/vlc-3.0.23-win64.msi'
+$VlcMsiSha256 = 'bc4b902a480b98a4a5479327a7f210f06369a59bf727649e320faba5b4ef1f5e'
 $RecoveredProfileRoot = Join-Path $env:SystemDrive 'Users\SchoolQuizKiosk-Recovered'
 $OfflineVideoShortcutName = 'Uchida-Kraepelin'
 $SchoolYouTubeChannelId = 'UCnO2_eea5GNawtwjJunEXVg'
@@ -432,18 +441,101 @@ function Get-VlcExecutable {
     return $null
 }
 
+function Get-FileSha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+}
+
+function Install-VlcForAllUsers {
+    $existing = Get-VlcExecutable
+    if ($existing) { return $existing }
+
+    $msiPath = Join-Path $Root ("vlc-{0}-win64.msi" -f $VlcVersion)
+    try {
+        Write-Log "VLC was not found. Downloading the official VideoLAN $VlcVersion 64-bit MSI."
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $VlcMsiUrl -OutFile $msiPath -UseBasicParsing -ErrorAction Stop
+
+        $actualHash = Get-FileSha256Hex -Path $msiPath
+        if ($actualHash -cne $VlcMsiSha256) {
+            throw "VLC MSI SHA-256 verification failed. Expected $VlcMsiSha256; received $actualHash."
+        }
+
+        $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" `
+            -ArgumentList @('/i', ('"{0}"' -f $msiPath), 'ALLUSERS=1', '/qn', '/norestart') `
+            -Wait -PassThru
+        if ($process.ExitCode -notin @(0, 3010)) {
+            throw "VLC MSI installation failed with exit code $($process.ExitCode)."
+        }
+
+        $installed = Get-VlcExecutable
+        if (-not $installed) {
+            throw 'VLC installation completed, but vlc.exe could not be found.'
+        }
+        Write-Log "Verified VLC $VlcVersion installed at: $installed" 'OK'
+        return $installed
+    } finally {
+        Remove-Item -LiteralPath $msiPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Install-KioskOfflineVideo {
+    param([Parameter(Mandatory = $true)]$User)
+
+    $profilePath = Get-OrCreateKioskProfilePath -User $User
+    if ([string]::IsNullOrWhiteSpace($profilePath)) {
+        throw 'Windows did not return a profile path for the managed kiosk account.'
+    }
+
+    $downloadsPath = Join-Path $profilePath 'Downloads'
+    if (-not (Test-Path -LiteralPath $downloadsPath)) {
+        New-Item -ItemType Directory -Path $downloadsPath -Force | Out-Null
+    }
+    $destination = Join-Path $downloadsPath $OfflineVideoFileName
+
+    if (Test-Path -LiteralPath $destination -PathType Leaf) {
+        $existingHash = Get-FileSha256Hex -Path $destination
+        if ($existingHash -ceq $OfflineVideoSha256) {
+            Write-Log "Verified existing offline video at the SID-resolved kiosk profile path: $destination" 'OK'
+            return $destination
+        }
+    }
+
+    $temporaryPath = Join-Path $downloadsPath ('.' + $OfflineVideoFileName + '.download-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        Write-Log "Downloading the verified Uchida-Kraepelin video to the SID-resolved kiosk profile: $destination"
+        $basicToken = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($OfflineVideoShareToken + ':'))
+        $headers = @{ Authorization = 'Basic ' + $basicToken }
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $OfflineVideoUrl -Headers $headers -OutFile $temporaryPath -UseBasicParsing -ErrorAction Stop
+
+        $downloadedFile = Get-Item -LiteralPath $temporaryPath -ErrorAction Stop
+        if ([int64]$downloadedFile.Length -ne [int64]$OfflineVideoSize) {
+            throw "Offline video size verification failed. Expected $OfflineVideoSize bytes; received $($downloadedFile.Length)."
+        }
+        $actualHash = Get-FileSha256Hex -Path $temporaryPath
+        if ($actualHash -cne $OfflineVideoSha256) {
+            throw "Offline video SHA-256 verification failed. Expected $OfflineVideoSha256; received $actualHash."
+        }
+
+        Move-Item -LiteralPath $temporaryPath -Destination $destination -Force
+        Write-Log "Downloaded and verified the offline video at: $destination" 'OK'
+        return $destination
+    } finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Set-KioskOfflineVideoShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$VlcPath,
-        [string]$VideoPath = $OfflineVideoPath
+        [Parameter(Mandatory = $true)][string]$VideoPath
     )
 
     # Launch VLC directly; no file association or student PowerShell access is needed.
     New-KioskShortcut -Name $OfflineVideoShortcutName -TargetPath $VlcPath `
         -Arguments ('"{0}"' -f $VideoPath) -IconLocation ($VlcPath + ',0') | Out-Null
-    if (-not (Test-Path -LiteralPath $VideoPath -PathType Leaf)) {
-        Write-Log "Offline video is not present yet. Place the MP4 at $VideoPath before using $OfflineVideoShortcutName." 'WARN'
-    }
 }
 
 function New-KioskShortcut {
@@ -494,9 +586,8 @@ function Install-KioskShortcuts {
 
     Set-KioskQuizShortcutAppMode -ChromePath $ChromePath -KioskUrl $KioskUrl
     Set-KioskYouTubeShortcutAppMode -ChromePath $ChromePath
-    if (-not [string]::IsNullOrWhiteSpace($VlcPath)) {
-        Set-KioskOfflineVideoShortcut -VlcPath $VlcPath
-    }
+    # The media shortcut is created after Assigned Access materializes the managed account,
+    # allowing its target to use the real SID-resolved profile path.
     New-KioskShortcut -Name 'Student Files' -TargetPath "$env:WINDIR\explorer.exe" -Arguments 'shell:Downloads' -IconLocation ("$env:WINDIR\explorer.exe,0") | Out-Null
 
     foreach ($app in $OfficeApps) {
@@ -864,14 +955,14 @@ function Get-KioskOfflineVideoPath {
                 if ($profile) { $profilePath = [string]$profile.LocalPath }
             }
             if (-not [string]::IsNullOrWhiteSpace($profilePath)) {
-                return (Join-Path $profilePath 'Downloads\uchida-kraepelin.mp4')
+                return (Join-Path (Join-Path $profilePath 'Downloads') $OfflineVideoFileName)
             }
         }
     } catch {
-        Write-Log "The managed profile path could not be resolved; using the default offline-video path. $($_.Exception.Message)" 'WARN'
+        Write-Log "The managed kiosk profile path could not be resolved. $($_.Exception.Message)" 'WARN'
     }
 
-    return $OfflineVideoPath
+    return $null
 }
 
 function Move-KioskProfileToRecovery {
@@ -1706,8 +1797,7 @@ function Update-KioskOfflineMedia {
     }
     $vlc = Get-VlcExecutable
     if (-not $vlc) {
-        Write-Log 'Offline video shortcut was not enabled: install desktop VLC for all users in Program Files\VideoLAN\VLC, then rerun -Mode Media or the one-line installer.' 'WARN'
-        return
+        $vlc = Install-VlcForAllUsers
     }
 
     $state = Read-JsonFile -Path $StatePath
@@ -1719,8 +1809,11 @@ function Update-KioskOfflineMedia {
     $officeApps = @()
     if ($state.PSObject.Properties['OfficeApps']) { $officeApps = @($state.OfficeApps) }
 
-    $resolvedVideoPath = Get-KioskOfflineVideoPath -ExpectedDisplayName ([string]$state.DisplayName)
-    Set-KioskOfflineVideoShortcut -VlcPath $vlc -VideoPath $resolvedVideoPath
+    $managedUser = Wait-ManagedKioskUser -ExpectedDisplayName ([string]$state.DisplayName) -TimeoutSeconds 30
+    if (-not $managedUser) {
+        throw 'The managed kiosk account has not materialized. Restart Windows, sign in as Administrator, and rerun the one-line installer.'
+    }
+    $resolvedVideoPath = Install-KioskOfflineVideo -User $managedUser
     $xml = Build-AssignedAccessXml -ChromePath ([string]$state.ChromePath) `
         -KioskUrl ([string]$state.Url) -KioskDisplayName ([string]$state.DisplayName) `
         -ProfileId ([string]$state.ProfileId) -OfficeApps $officeApps -VlcPath $vlc
@@ -1739,8 +1832,11 @@ function Update-KioskOfflineMedia {
             throw
         }
     }
+    Set-KioskOfflineVideoShortcut -VlcPath $vlc -VideoPath $resolvedVideoPath
     $state | Add-Member -NotePropertyName VlcPath -NotePropertyValue $vlc -Force
     $state | Add-Member -NotePropertyName OfflineVideoPath -NotePropertyValue $resolvedVideoPath -Force
+    $state | Add-Member -NotePropertyName OfflineVideoUrl -NotePropertyValue $OfflineVideoUrl -Force
+    $state | Add-Member -NotePropertyName OfflineVideoSha256 -NotePropertyValue $OfflineVideoSha256 -Force
     Write-JsonFile -InputObject $state -Path $StatePath
     Write-Log 'Enabled the Uchida-Kraepelin shortcut and allowed VLC in Assigned Access. Sign out of the student account and sign in again, or restart Windows.' 'OK'
     Complete-WithOptionalRestart -RestartRequired $true
@@ -2086,7 +2182,20 @@ function Write-DiagnosticReport {
         })) {
             $lines.Add(('Orphan profile: SID={0}; Path={1}; Loaded={2}' -f $profile.SID, $profile.LocalPath, $profile.Loaded))
         }
-        $lines.Add(('Resolved offline video path: {0}' -f (Get-KioskOfflineVideoPath)))
+        $resolvedMediaPath = Get-KioskOfflineVideoPath
+        $lines.Add(('Resolved offline video path: {0}' -f $(if ($resolvedMediaPath) { $resolvedMediaPath } else { 'Not available until the managed account/profile is created' })))
+        $lines.Add(('Offline video source: {0}' -f $OfflineVideoUrl))
+        $lines.Add(('Offline video expected SHA-256: {0}' -f $OfflineVideoSha256))
+        if ($resolvedMediaPath -and (Test-Path -LiteralPath $resolvedMediaPath -PathType Leaf)) {
+            $mediaFile = Get-Item -LiteralPath $resolvedMediaPath
+            $mediaHash = Get-FileSha256Hex -Path $resolvedMediaPath
+            $mediaStatus = if ($mediaFile.Length -eq $OfflineVideoSize -and $mediaHash -ceq $OfflineVideoSha256) { 'Verified' } else { 'INVALID - rerun installer to replace it' }
+            $lines.Add(('Offline video file: {0}; Bytes={1}; SHA-256={2}' -f $mediaStatus, $mediaFile.Length, $mediaHash))
+        } elseif ($resolvedMediaPath) {
+            $lines.Add('Offline video file: Missing - rerun the installer to download it')
+        }
+        $diagnosticVlc = Get-VlcExecutable
+        $lines.Add(('VLC: {0}' -f $(if ($diagnosticVlc) { $diagnosticVlc } else { 'Not installed - rerun the installer to install the verified package' })))
     } catch {
         $lines.Add(('Kiosk account/profile inventory failed: {0}' -f $_.Exception.Message))
     }
@@ -2526,6 +2635,14 @@ function Invoke-KioskPreflight {
         Add-Check 'Google Chrome' 'INFO' 'Chrome is not installed. The installer will download the official Chrome Enterprise MSI.'
     }
 
+    $vlc = Get-VlcExecutable
+    if ($vlc) {
+        Add-Check 'VLC media player' 'PASS' $vlc
+    } else {
+        Add-Check 'VLC media player' 'INFO' "Not installed; the installer will download the verified official VideoLAN $VlcVersion 64-bit MSI."
+    }
+    Add-Check 'Uchida-Kraepelin media' 'INFO' "The verified $OfflineVideoSize-byte MP4 will be downloaded from YSNLC Cloud after Windows creates the managed account, then stored in that account's SID-resolved Downloads folder."
+
     $officeApps = @(Get-OfficeApps)
     foreach ($officeName in @('Microsoft Word','Microsoft Excel','Microsoft PowerPoint')) {
         $found = $officeApps | Where-Object Name -eq $officeName | Select-Object -First 1
@@ -2661,7 +2778,9 @@ function Install-Kiosk {
     $officeApps = @(Get-OfficeApps)
     $vlc = Get-VlcExecutable
     if (-not $vlc) {
-        Write-Log 'VLC was not found. Install desktop VLC for all users, then rerun the installer to enable the offline video shortcut.' 'WARN'
+        $vlc = Install-VlcForAllUsers
+    } else {
+        Write-Log "VLC found at: $vlc" 'OK'
     }
     foreach ($wanted in @('Microsoft Word','Microsoft Excel','Microsoft PowerPoint')) {
         $found = $officeApps | Where-Object Name -eq $wanted | Select-Object -First 1
@@ -2726,7 +2845,9 @@ function Install-Kiosk {
             DisplayName                 = $DisplayName
             ChromePath                  = $chrome
             VlcPath                     = $vlc
-            OfflineVideoPath            = $OfflineVideoPath
+            OfflineVideoPath            = $null
+            OfflineVideoUrl             = $OfflineVideoUrl
+            OfflineVideoSha256          = $OfflineVideoSha256
             OfficeApps                  = @($officeApps | ForEach-Object { [ordered]@{ Name = $_.Name; Path = $_.Path } })
             FileExplorerNamespace       = 'DownloadsOnly'
             ProfileId                   = $profileId
@@ -2758,10 +2879,16 @@ function Install-Kiosk {
         if ($vlc) {
             $managedUser = Wait-ManagedKioskUser -ExpectedDisplayName $DisplayName -TimeoutSeconds 30
             if ($managedUser) {
-                $resolvedVideoPath = Get-KioskOfflineVideoPath -ExpectedDisplayName $DisplayName -CreateProfile
-                Set-KioskOfflineVideoShortcut -VlcPath $vlc -VideoPath $resolvedVideoPath
-                $state.OfflineVideoPath = $resolvedVideoPath
-                Write-JsonFile -InputObject $state -Path $StatePath
+                try {
+                    $resolvedVideoPath = Install-KioskOfflineVideo -User $managedUser
+                    Set-KioskOfflineVideoShortcut -VlcPath $vlc -VideoPath $resolvedVideoPath
+                    $state.OfflineVideoPath = $resolvedVideoPath
+                    Write-JsonFile -InputObject $state -Path $StatePath
+                } catch {
+                    Write-Log "The kiosk is restricted, but the offline video could not be downloaded. Rerun the one-line installer to retry. $($_.Exception.Message)" 'WARN'
+                }
+            } else {
+                Write-Log 'The managed kiosk account has not materialized yet. Rerun the one-line installer after restart to download the offline video into its resolved Downloads folder.' 'WARN'
             }
         }
 
@@ -2950,7 +3077,7 @@ function Repair-OrphanedKioskInstall {
     Write-Host 'Orphaned kiosk repair completed.' -ForegroundColor Green
     Write-Host "Any existing kiosk profile data was preserved under: $RecoveredProfileRoot" -ForegroundColor Green
     Write-Host "Diagnostics saved to: $report" -ForegroundColor Green
-    Write-Host 'Restart Windows, then run the same one-line installer again. Windows can then create a clean KioskUser0 profile.' -ForegroundColor Yellow
+    Write-Host 'Restart Windows, then run the same one-line installer again. Windows can then create a clean managed profile at the path it selects.' -ForegroundColor Yellow
 }
 
 # ---------------- Main entry point ----------------

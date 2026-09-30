@@ -17,7 +17,7 @@ foreach ($statement in $setupAst.EndBlock.Statements) {
     if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
         . ([scriptblock]::Create($statement.Extent.Text))
     } elseif ($statement -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $statement.Left.Extent.Text -in @('$OfflineVideoPath', '$OfflineVideoShortcutName')) {
+        $statement.Left.Extent.Text -in @('$OfflineVideoFileName', '$OfflineVideoShortcutName', '$OfflineVideoUrl', '$OfflineVideoSha256')) {
         . ([scriptblock]::Create($statement.Extent.Text))
     }
 }
@@ -77,12 +77,20 @@ try {
         param($Message, $Level)
         if ($Level -eq 'WARN') { $script:warnings += $Message }
     }
-    Set-KioskOfflineVideoShortcut -VlcPath $vlc64
+    $dynamicVideoPath = 'C:\Users\WindowsChosenProfile\Downloads\uchida-kraepelin.mp4'
+    Set-KioskOfflineVideoShortcut -VlcPath $vlc64 -VideoPath $dynamicVideoPath
     Assert-True ($capturedShortcut.TargetPath -eq $vlc64) 'Shortcut must launch VLC directly.'
-    Assert-True ($capturedShortcut.Arguments -ceq '"C:\Users\KioskUser0\Downloads\uchida-kraepelin.mp4"') 'Shortcut must quote the exact requested video path.'
-    Assert-True ($warnings.Count -gt 0) 'A missing video should warn, not prevent configuration.'
-    Set-KioskOfflineVideoShortcut -VlcPath $vlc64 -VideoPath 'C:\Users\KioskUser0.YS-LAB-CPU-3\Downloads\uchida-kraepelin.mp4'
-    Assert-True ($capturedShortcut.Arguments -ceq '"C:\Users\KioskUser0.YS-LAB-CPU-3\Downloads\uchida-kraepelin.mp4"') 'Shortcut must support the actual SID-resolved Windows profile path.'
+    Assert-True ($capturedShortcut.Arguments -ceq ('"{0}"' -f $dynamicVideoPath)) 'Shortcut must quote the SID-resolved profile path without assuming a kiosk folder name.'
+    Set-KioskOfflineVideoShortcut -VlcPath $vlc64 -VideoPath 'D:\Profiles\AccountSelectedByWindows\Downloads\uchida-kraepelin.mp4'
+    Assert-True ($capturedShortcut.Arguments -ceq '"D:\Profiles\AccountSelectedByWindows\Downloads\uchida-kraepelin.mp4"') 'Shortcut must accept the profile path returned by Windows without imposing a folder name.'
+
+    function Get-CimInstance {
+        [CmdletBinding()]
+        param($ClassName, $Filter)
+        return [pscustomobject]@{ SID = 'S-1-5-21-1-2-3-1001'; LocalPath = 'D:\Profiles\AccountSelectedByWindows'; Loaded = $false }
+    }
+    $resolvedProfile = Get-OrCreateKioskProfilePath -User ([pscustomobject]@{ Name = 'AnyManagedName'; SID = 'S-1-5-21-1-2-3-1001' })
+    Assert-True ($resolvedProfile -eq 'D:\Profiles\AccountSelectedByWindows') 'The media workflow must use the profile registered to the account SID, not derive a folder from the account or PC name.'
 
     $StatePath = Join-Path $scratch 'State.json'
     $XmlPath = Join-Path $scratch 'AssignedAccess.xml'
@@ -101,10 +109,12 @@ try {
         if ($script:failApply) { throw 'Simulated policy failure' }
     }
     function Complete-WithOptionalRestart { param($RestartRequired) }
+    function Wait-ManagedKioskUser { param($ExpectedDisplayName, $TimeoutSeconds); return [pscustomobject]@{ Name = 'WindowsChosenAccount'; SID = 'S-1-5-21-1-2-3-1001' } }
+    function Install-KioskOfflineVideo { param($User); return $dynamicVideoPath }
     Update-KioskOfflineMedia
     Assert-True ($applyCount -eq 1) 'An existing kiosk must receive the updated policy.'
     $updated = Read-JsonFile -Path $StatePath
-    Assert-True ($updated.VlcPath -eq $vlc64 -and $updated.ProfileId -eq $state.ProfileId -and $updated.DisabledLocalUserName -eq 'YSNLC') 'Media update must persist VLC and preserve kiosk identity/state.'
+    Assert-True ($updated.VlcPath -eq $vlc64 -and $updated.OfflineVideoPath -eq $dynamicVideoPath -and $updated.ProfileId -eq $state.ProfileId -and $updated.DisabledLocalUserName -eq 'YSNLC') 'Media update must persist the resolved media path and preserve kiosk identity/state.'
     Update-KioskOfflineMedia
     Assert-True ($applyCount -eq 1) 'A repeat media update must not reapply unchanged policy.'
 
@@ -121,11 +131,22 @@ try {
 
     $beforeState = Get-Content -LiteralPath $StatePath -Raw
     Remove-Item -LiteralPath $vlc64, $vlc32
+    $script:vlcInstallCount = 0
+    function Install-VlcForAllUsers {
+        $script:vlcInstallCount++
+        New-Item -ItemType File -Path $vlc32 -Force | Out-Null
+        return $vlc32
+    }
     Update-KioskOfflineMedia
-    Assert-True ((Get-Content -LiteralPath $StatePath -Raw) -ceq $beforeState) 'Missing VLC must leave state unchanged.'
+    Assert-True ($vlcInstallCount -eq 1) 'Missing VLC must trigger the verified all-users installer.'
+    Assert-True ((Read-JsonFile -Path $StatePath).VlcPath -eq $vlc32) 'The installed VLC path must be persisted.'
 
-    New-Item -ItemType File -Path $vlc32 | Out-Null
+    $beforeState = Get-Content -LiteralPath $StatePath -Raw
     $beforeXml = Get-Content -LiteralPath $XmlPath -Raw
+    # Force the next update to build different policy XML so the simulated
+    # policy failure exercises the rollback path after VLC was auto-installed.
+    Remove-Item -LiteralPath $vlc32
+    New-Item -ItemType File -Path $vlc64 -Force | Out-Null
     $script:failApply = $true
     $failed = $false
     try { Update-KioskOfflineMedia } catch { $failed = $true }
