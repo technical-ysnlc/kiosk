@@ -56,8 +56,11 @@ try {
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try { & $PowerShellPath @childArguments 2>&1 | Out-Null } finally { $ErrorActionPreference = $savedPreference }
-    Assert-True ($LASTEXITCODE -ne 0) 'Changing the wrapper after hashing must fail.'
+    Assert-True ($LASTEXITCODE -eq 1) 'Changing the wrapper after hashing must return the verifier failure code.'
     Assert-True (-not (Test-Path -LiteralPath $markerPath)) 'Tampered wrapper bytes must never execute.'
+    # GitHub's PowerShell step exits with LASTEXITCODE. The child failure above
+    # is expected and already asserted; report success only after all checks pass.
+    $global:LASTEXITCODE = 0
     Write-Host "PASS: expanded bootstrap syntax, large wrapper, short $($arguments.Length)-character launch, quoted paths, exit codes, and tamper rejection."
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force
