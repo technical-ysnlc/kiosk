@@ -18,7 +18,7 @@
     cannot remain an unrestricted route to the desktop.
   - Repairs required Assigned Access/AppLocker service startup settings when they were disabled,
     and records their previous settings for removal.
-  - Includes rollback and diagnostics modes.
+  - Includes rollback, orphaned-profile repair, and diagnostics modes.
 
   IMPORTANT:
   1. This script is intended for Windows 11 Pro, Enterprise, Education, or IoT Enterprise.
@@ -43,6 +43,10 @@
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Diagnose
 
 .EXAMPLE
+  # Only after kiosk records were manually deleted and a kioskUser* account was left behind.
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Repair
+
+.EXAMPLE
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Setup-SchoolQuizKiosk.ps1 -Mode Preflight
 
 .EXAMPLE
@@ -52,7 +56,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Remove', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock', 'YouTubePolicy', 'Wireless', 'Media')]
+    [ValidateSet('Install', 'Remove', 'Repair', 'Diagnose', 'Preflight', 'Branding', 'ApplyBranding', 'AiBlock', 'YouTubePolicy', 'Wireless', 'Media')]
     [string]$Mode = 'Install',
 
     [ValidatePattern('^https://')]
@@ -103,8 +107,9 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.5.4'
+$KioskVersion = '2.6.0'
 $OfflineVideoPath = 'C:\Users\KioskUser0\Downloads\uchida-kraepelin.mp4'
+$RecoveredProfileRoot = Join-Path $env:SystemDrive 'Users\SchoolQuizKiosk-Recovered'
 $OfflineVideoShortcutName = 'Uchida-Kraepelin'
 $SchoolYouTubeChannelId = 'UCnO2_eea5GNawtwjJunEXVg'
 $SchoolYouTubeHandle = 'ysnlc_yt'
@@ -428,13 +433,16 @@ function Get-VlcExecutable {
 }
 
 function Set-KioskOfflineVideoShortcut {
-    param([Parameter(Mandatory = $true)][string]$VlcPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$VlcPath,
+        [string]$VideoPath = $OfflineVideoPath
+    )
 
     # Launch VLC directly; no file association or student PowerShell access is needed.
     New-KioskShortcut -Name $OfflineVideoShortcutName -TargetPath $VlcPath `
-        -Arguments ('"{0}"' -f $OfflineVideoPath) -IconLocation ($VlcPath + ',0') | Out-Null
-    if (-not (Test-Path -LiteralPath $OfflineVideoPath -PathType Leaf)) {
-        Write-Log "Offline video is not present yet. Place the MP4 at $OfflineVideoPath before using $OfflineVideoShortcutName." 'WARN'
+        -Arguments ('"{0}"' -f $VideoPath) -IconLocation ($VlcPath + ',0') | Out-Null
+    if (-not (Test-Path -LiteralPath $VideoPath -PathType Leaf)) {
+        Write-Log "Offline video is not present yet. Place the MP4 at $VideoPath before using $OfflineVideoShortcutName." 'WARN'
     }
 }
 
@@ -819,6 +827,7 @@ namespace YSNLC {
             uint cchProfilePath);
     }
 }
+
 '@ -ErrorAction Stop
     }
 
@@ -836,6 +845,117 @@ namespace YSNLC {
     $exception = [Runtime.InteropServices.Marshal]::GetExceptionForHR($hr)
     $hrUnsigned = [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes([int]$hr), 0)
     throw "Could not create the managed kiosk user profile. HRESULT=0x{0:X8}; {1}" -f $hrUnsigned, $exception.Message
+}
+
+function Get-KioskOfflineVideoPath {
+    param(
+        [string]$ExpectedDisplayName = $DisplayName,
+        [switch]$CreateProfile
+    )
+
+    try {
+        $user = Get-ManagedKioskUser -ExpectedDisplayName $ExpectedDisplayName
+        if ($user) {
+            $profilePath = $null
+            if ($CreateProfile) {
+                $profilePath = Get-OrCreateKioskProfilePath -User $user
+            } else {
+                $profile = Get-CimInstance Win32_UserProfile -Filter ("SID='{0}'" -f ([string]$user.SID).Replace("'", "''")) -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($profile) { $profilePath = [string]$profile.LocalPath }
+            }
+            if (-not [string]::IsNullOrWhiteSpace($profilePath)) {
+                return (Join-Path $profilePath 'Downloads\uchida-kraepelin.mp4')
+            }
+        }
+    } catch {
+        Write-Log "The managed profile path could not be resolved; using the default offline-video path. $($_.Exception.Message)" 'WARN'
+    }
+
+    return $OfflineVideoPath
+}
+
+function Move-KioskProfileToRecovery {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProfilePath,
+        [string]$Sid = 'unknown'
+    )
+
+    if (-not (Test-Path -LiteralPath $ProfilePath -PathType Container)) {
+        return $null
+    }
+
+    if (-not (Test-Path -LiteralPath $RecoveredProfileRoot)) {
+        New-Item -ItemType Directory -Path $RecoveredProfileRoot -Force | Out-Null
+    }
+    $leaf = Split-Path $ProfilePath -Leaf
+    $sidTail = ($Sid -replace '^.*-', '')
+    $destination = Join-Path $RecoveredProfileRoot ('{0}-{1}-{2}' -f $leaf, (Get-Date -Format 'yyyyMMdd-HHmmss'), $sidTail)
+    Move-Item -LiteralPath $ProfilePath -Destination $destination -Force -ErrorAction Stop
+    Write-Log "Preserved the old kiosk profile at: $destination" 'OK'
+    return $destination
+}
+
+function Remove-KioskProfileRegistration {
+    param([Parameter(Mandatory = $true)]$Profile)
+
+    if ([bool]$Profile.Loaded) {
+        throw "The kiosk profile is still loaded: $($Profile.LocalPath). Sign out of the kiosk account, restart Windows, and run repair again."
+    }
+
+    $profilePath = [string]$Profile.LocalPath
+    if (-not [string]::IsNullOrWhiteSpace($profilePath)) {
+        [void](Move-KioskProfileToRecovery -ProfilePath $profilePath -Sid ([string]$Profile.SID))
+    }
+    try {
+        Remove-CimInstance -InputObject $Profile -ErrorAction Stop
+    } catch {
+        # Some Windows builds return an error after the profile directory has already been
+        # moved aside. Remove only the exact SID registration that was just inventoried.
+        $profileKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($Profile.SID)"
+        if (Test-Path -LiteralPath $profileKey) {
+            Remove-Item -LiteralPath $profileKey -Recurse -Force -ErrorAction Stop
+        }
+    }
+    Write-Log "Removed stale Windows profile registration for SID $($Profile.SID)." 'OK'
+}
+
+function Repair-KioskAccountAndProfiles {
+    param(
+        [string]$ExpectedDisplayName = $DisplayName,
+        [switch]$IncludeOrphanProfiles
+    )
+
+    $managedUsers = @(Get-LocalUser -ErrorAction Stop | Where-Object {
+        $_.Name -like 'kioskUser*' -and [string]$_.FullName -eq $ExpectedDisplayName
+    })
+    foreach ($user in $managedUsers) {
+        $profile = Get-CimInstance Win32_UserProfile -Filter ("SID='{0}'" -f ([string]$user.SID).Replace("'", "''")) -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($profile) {
+            Remove-KioskProfileRegistration -Profile $profile
+        }
+        Remove-LocalUser -Name $user.Name -ErrorAction Stop
+        Write-Log "Removed managed kiosk account: $($user.Name) ($($user.SID))." 'OK'
+    }
+
+    if ($IncludeOrphanProfiles) {
+        $localSids = @((Get-LocalUser -ErrorAction Stop) | ForEach-Object { [string]$_.SID })
+        $profiles = @(Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object {
+            $path = [string]$_.LocalPath
+            $leaf = if ([string]::IsNullOrWhiteSpace($path)) { '' } else { Split-Path $path -Leaf }
+            $leaf -match '^kioskUser\d+(?:\..+)?$' -and ($localSids -notcontains ([string]$_.SID))
+        })
+        foreach ($profile in $profiles) {
+            Remove-KioskProfileRegistration -Profile $profile
+        }
+
+        $usersRoot = Join-Path $env:SystemDrive 'Users'
+        $registeredPaths = @((Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue) | ForEach-Object { [string]$_.LocalPath })
+        foreach ($directory in @(Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match '^kioskUser\d+(?:\..+)?$' -and ($registeredPaths -notcontains $_.FullName)
+        })) {
+            [void](Move-KioskProfileToRecovery -ProfilePath $directory.FullName)
+        }
+    }
 }
 
 function Invoke-WithKioskUserHive {
@@ -1599,7 +1719,8 @@ function Update-KioskOfflineMedia {
     $officeApps = @()
     if ($state.PSObject.Properties['OfficeApps']) { $officeApps = @($state.OfficeApps) }
 
-    Set-KioskOfflineVideoShortcut -VlcPath $vlc
+    $resolvedVideoPath = Get-KioskOfflineVideoPath -ExpectedDisplayName ([string]$state.DisplayName)
+    Set-KioskOfflineVideoShortcut -VlcPath $vlc -VideoPath $resolvedVideoPath
     $xml = Build-AssignedAccessXml -ChromePath ([string]$state.ChromePath) `
         -KioskUrl ([string]$state.Url) -KioskDisplayName ([string]$state.DisplayName) `
         -ProfileId ([string]$state.ProfileId) -OfficeApps $officeApps -VlcPath $vlc
@@ -1619,7 +1740,7 @@ function Update-KioskOfflineMedia {
         }
     }
     $state | Add-Member -NotePropertyName VlcPath -NotePropertyValue $vlc -Force
-    $state | Add-Member -NotePropertyName OfflineVideoPath -NotePropertyValue $OfflineVideoPath -Force
+    $state | Add-Member -NotePropertyName OfflineVideoPath -NotePropertyValue $resolvedVideoPath -Force
     Write-JsonFile -InputObject $state -Path $StatePath
     Write-Log 'Enabled the Uchida-Kraepelin shortcut and allowed VLC in Assigned Access. Sign out of the student account and sign in again, or restart Windows.' 'OK'
     Complete-WithOptionalRestart -RestartRequired $true
@@ -1744,14 +1865,15 @@ function Copy-ScriptToProgramData {
 }
 
 function Invoke-SystemTask {
-    param([ValidateSet('Install', 'Remove')][string]$SystemMode)
+    param([ValidateSet('Install', 'Remove', 'Repair')][string]$SystemMode)
 
     Copy-ScriptToProgramData
     Remove-Item -LiteralPath $SystemResultPath -Force -ErrorAction SilentlyContinue
 
     Write-JsonFile -Path $SystemRequestPath -InputObject ([ordered]@{
-        Mode    = $SystemMode
-        XmlPath = $XmlPath
+        Mode        = $SystemMode
+        XmlPath     = $XmlPath
+        DisplayName = $DisplayName
     })
 
     $taskName = 'SchoolQuizKiosk-System-' + [Guid]::NewGuid().ToString('N')
@@ -1844,7 +1966,7 @@ function Invoke-AssignedAccessSystemStage {
                 Success = $true
                 Message = 'Windows Assigned Access configuration was applied successfully.'
             })
-        } else {
+        } elseif ([string]$request.Mode -eq 'Remove') {
             if (Test-Path -LiteralPath $AssignedAccessBackupPath) {
                 $previousConfiguration = Get-Content -LiteralPath $AssignedAccessBackupPath -Raw -Encoding UTF8
                 $instance.Configuration = $previousConfiguration
@@ -1857,6 +1979,29 @@ function Invoke-AssignedAccessSystemStage {
             }
 
             Set-CimInstance -CimInstance $instance -ErrorAction Stop | Out-Null
+
+            Write-JsonFile -Path $SystemResultPath -InputObject ([ordered]@{
+                Success = $true
+                Message = $message
+            })
+        } else {
+            $configuration = [Net.WebUtility]::HtmlDecode([string]$instance.Configuration)
+            if ([string]::IsNullOrWhiteSpace($configuration)) {
+                $message = 'No active Windows Assigned Access configuration needed repair.'
+            } else {
+                $expectedDisplayName = [string]$request.DisplayName
+                $ownsConfiguration = (
+                    $configuration -match 'YSNLC Restricted Student Experience' -and
+                    $configuration -match '<AutoLogonAccount\b' -and
+                    $configuration -match [regex]::Escape($expectedDisplayName)
+                )
+                if (-not $ownsConfiguration) {
+                    throw 'An Assigned Access configuration exists, but it is not identifiable as the YSNLC kiosk. Repair refused to clear an unknown kiosk configuration.'
+                }
+                $instance.Configuration = $null
+                Set-CimInstance -CimInstance $instance -ErrorAction Stop | Out-Null
+                $message = 'The orphaned YSNLC Assigned Access configuration was cleared successfully.'
+            }
 
             Write-JsonFile -Path $SystemResultPath -InputObject ([ordered]@{
                 Success = $true
@@ -1901,6 +2046,7 @@ function Write-DiagnosticReport {
     $lines.Add(('EditionID: {0}' -f $info.EditionId))
     $lines.Add(('Version: {0}' -f $info.DisplayVersion))
     $lines.Add(('Build: {0}.{1}' -f $info.CurrentBuild, $info.UBR))
+    $lines.Add(('Computer name: {0}' -f $env:COMPUTERNAME))
     $lines.Add(('UAC EnableLUA: {0}' -f $uac))
     $lines.Add(('Chrome: {0}' -f $(if ($chrome) { $chrome } else { 'Not found' })))
     try {
@@ -1920,6 +2066,29 @@ function Write-DiagnosticReport {
         } else {
             $lines.Add(('Service {0}: Missing' -f $serviceName))
         }
+    }
+    $lines.Add('')
+
+    $lines.Add('Kiosk accounts and Windows profiles:')
+    try {
+        $kioskUsers = @(Get-LocalUser -ErrorAction Stop | Where-Object { $_.Name -like 'kioskUser*' })
+        if ($kioskUsers.Count -eq 0) {
+            $lines.Add('Local kioskUser* accounts: None')
+        }
+        foreach ($user in $kioskUsers) {
+            $profile = Get-CimInstance Win32_UserProfile -Filter ("SID='{0}'" -f ([string]$user.SID).Replace("'", "''")) -ErrorAction SilentlyContinue | Select-Object -First 1
+            $profileText = if ($profile) { "Path=$($profile.LocalPath); Loaded=$($profile.Loaded)" } else { 'No Win32_UserProfile registration' }
+            $lines.Add(('Account {0}: FullName={1}; Enabled={2}; SID={3}; {4}' -f $user.Name, $user.FullName, $user.Enabled, $user.SID, $profileText))
+        }
+        $localSids = @((Get-LocalUser -ErrorAction Stop) | ForEach-Object { [string]$_.SID })
+        foreach ($profile in @(Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object {
+            (Split-Path ([string]$_.LocalPath) -Leaf) -match '^kioskUser\d+(?:\..+)?$' -and ($localSids -notcontains ([string]$_.SID))
+        })) {
+            $lines.Add(('Orphan profile: SID={0}; Path={1}; Loaded={2}' -f $profile.SID, $profile.LocalPath, $profile.Loaded))
+        }
+        $lines.Add(('Resolved offline video path: {0}' -f (Get-KioskOfflineVideoPath)))
+    } catch {
+        $lines.Add(('Kiosk account/profile inventory failed: {0}' -f $_.Exception.Message))
     }
     $lines.Add('')
 
@@ -1964,21 +2133,7 @@ function Write-DiagnosticReport {
 function Remove-ManagedKioskUserIfPresent {
     param([string]$ExpectedDisplayName)
 
-    try {
-        $users = Get-LocalUser -ErrorAction Stop | Where-Object {
-            $_.Name -like 'kioskUser*' -and (
-                [string]::IsNullOrWhiteSpace($ExpectedDisplayName) -or
-                $_.FullName -eq $ExpectedDisplayName
-            )
-        }
-
-        foreach ($user in $users) {
-            Remove-LocalUser -Name $user.Name -ErrorAction Stop
-            Write-Log "Removed managed kiosk account: $($user.Name)" 'OK'
-        }
-    } catch {
-        Write-Log "The managed kiosk account could not be removed automatically: $($_.Exception.Message)" 'WARN'
-    }
+    Repair-KioskAccountAndProfiles -ExpectedDisplayName $ExpectedDisplayName
 }
 
 function Get-EnabledStandardLocalUsers {
@@ -2204,6 +2359,7 @@ function Invoke-KioskPreflight {
     Initialize-WorkingDirectory
 
     $checks = New-Object System.Collections.Generic.List[object]
+    $repairRecommended = $false
     function Add-Check {
         param(
             [string]$Name,
@@ -2281,7 +2437,7 @@ function Invoke-KioskPreflight {
     }
 
     $requiredCommands = @(
-        'Get-LocalUser','Get-LocalGroup','Get-LocalGroupMember','Disable-LocalUser',
+        'Get-LocalUser','Get-LocalGroup','Get-LocalGroupMember','Disable-LocalUser','Remove-LocalUser','Remove-CimInstance',
         'New-ScheduledTaskAction','New-ScheduledTaskTrigger','New-ScheduledTaskPrincipal',
         'New-ScheduledTaskSettingsSet','Register-ScheduledTask','Start-ScheduledTask','Unregister-ScheduledTask'
     )
@@ -2314,14 +2470,31 @@ function Invoke-KioskPreflight {
         }
     }
 
-    if (Test-KioskInstallEvidence) {
+    $hasInstallEvidence = Test-KioskInstallEvidence
+    if ($hasInstallEvidence) {
         Add-Check 'Existing kiosk state' 'FAIL' "Existing or incomplete kiosk state exists under $Root. Use the removal command before reinstalling."
     } else {
         Add-Check 'Existing kiosk state' 'PASS' 'No previous kiosk state was detected.'
     }
 
     try {
-        $otherUsers = @(Get-EnabledStandardLocalUsers -ExcludedUserNames @($DisableLocalUser))
+        $orphanedManagedUsers = @()
+        if (-not $hasInstallEvidence) {
+            $orphanedManagedUsers = @(Get-LocalUser -ErrorAction Stop | Where-Object {
+                $_.Name -like 'kioskUser*' -and [string]$_.FullName -eq $DisplayName
+            })
+        }
+        if ($orphanedManagedUsers.Count -gt 0) {
+            $repairRecommended = $true
+            $details = @($orphanedManagedUsers | ForEach-Object {
+                $profile = Get-CimInstance Win32_UserProfile -Filter ("SID='{0}'" -f ([string]$_.SID).Replace("'", "''")) -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($profile) { "$($_.Name) -> $($profile.LocalPath)" } else { "$($_.Name) -> no registered profile" }
+            })
+            Add-Check 'Orphaned YSNLC kiosk account' 'FAIL' ('A prior failed/deleted installation left a Windows-managed kiosk account: ' + ($details -join '; ') + '. The verified installer can repair it without deleting the preserved profile data.')
+        }
+
+        $excludedUsers = @($DisableLocalUser) + @($orphanedManagedUsers | ForEach-Object { [string]$_.Name })
+        $otherUsers = @(Get-EnabledStandardLocalUsers -ExcludedUserNames $excludedUsers)
         if ($otherUsers.Count -gt 0) {
             $names = @($otherUsers | ForEach-Object { $_.Name })
             Add-Check 'Other standard local users' 'FAIL' ('These enabled standard accounts would keep a normal desktop: ' + ($names -join ', '))
@@ -2400,6 +2573,7 @@ function Invoke-KioskPreflight {
         Version = $KioskVersion
         Generated = (Get-Date).ToString('o')
         CanInstall = $canInstall
+        RepairRecommended = $repairRecommended
         Checks = $checks.ToArray()
     }
 
@@ -2579,6 +2753,18 @@ function Install-Kiosk {
         $assignedAccessAttempted = $true
         Invoke-SystemTask -SystemMode Install
 
+        # Assigned Access chooses the internal account name. Resolve the profile by SID instead
+        # of assuming its folder stayed C:\Users\KioskUser0 after a PC rename or prior failure.
+        if ($vlc) {
+            $managedUser = Wait-ManagedKioskUser -ExpectedDisplayName $DisplayName -TimeoutSeconds 30
+            if ($managedUser) {
+                $resolvedVideoPath = Get-KioskOfflineVideoPath -ExpectedDisplayName $DisplayName -CreateProfile
+                Set-KioskOfflineVideoShortcut -VlcPath $vlc -VideoPath $resolvedVideoPath
+                $state.OfflineVideoPath = $resolvedVideoPath
+                Write-JsonFile -InputObject $state -Path $StatePath
+            }
+        }
+
         Set-SchoolYouTubeChromePolicies
         Register-SchoolYouTubePolicyTask
 
@@ -2742,6 +2928,31 @@ function Remove-Kiosk {
     Complete-WithOptionalRestart -RestartRequired $true
 }
 
+function Repair-OrphanedKioskInstall {
+    if (Test-KioskInstallEvidence) {
+        throw 'Kiosk installation records still exist. Use -Mode Remove for a recorded installation; Repair is only for an orphaned account after those records were lost or manually deleted.'
+    }
+
+    $managedUsers = @(Get-LocalUser -ErrorAction Stop | Where-Object {
+        $_.Name -like 'kioskUser*' -and [string]$_.FullName -eq $DisplayName
+    })
+    if ($managedUsers.Count -eq 0) {
+        throw "No orphaned Windows-managed kiosk account with display name '$DisplayName' was found. Repair made no changes."
+    }
+
+    Write-Log ('Repairing orphaned kiosk account(s): ' + (@($managedUsers | ForEach-Object { $_.Name }) -join ', ')) 'WARN'
+    Invoke-SystemTask -SystemMode Repair
+    Repair-KioskAccountAndProfiles -ExpectedDisplayName $DisplayName -IncludeOrphanProfiles
+    Remove-Item -LiteralPath $SystemRequestPath, $SystemResultPath -Force -ErrorAction SilentlyContinue
+
+    $report = Write-DiagnosticReport
+    Write-Host ''
+    Write-Host 'Orphaned kiosk repair completed.' -ForegroundColor Green
+    Write-Host "Any existing kiosk profile data was preserved under: $RecoveredProfileRoot" -ForegroundColor Green
+    Write-Host "Diagnostics saved to: $report" -ForegroundColor Green
+    Write-Host 'Restart Windows, then run the same one-line installer again. Windows can then create a clean KioskUser0 profile.' -ForegroundColor Yellow
+}
+
 # ---------------- Main entry point ----------------
 
 if ($Stage -eq 'System') {
@@ -2763,6 +2974,10 @@ try {
         }
         'Remove' {
             Remove-Kiosk
+        }
+        'Repair' {
+            Repair-OrphanedKioskInstall
+            exit 10
         }
         'Diagnose' {
             $report = Write-DiagnosticReport

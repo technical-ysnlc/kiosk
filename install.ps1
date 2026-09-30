@@ -24,7 +24,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$BootstrapVersion = '1.2.2'
+$BootstrapVersion = '1.3.0'
 $ManifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPath = '/technical-ysnlc/kiosk/'
@@ -440,7 +440,36 @@ try {
     Write-Host ''
     Write-Host 'Running YSNLC compatibility preflight...' -ForegroundColor Cyan
     & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Preflight
-    if (`$LASTEXITCODE -ne 0) {
+    `$preflightExit = `$LASTEXITCODE
+    if (`$preflightExit -ne 0) {
+        `$repairRecommended = `$false
+        `$preflightJson = Join-Path `$kioskRoot 'Preflight.json'
+        try {
+            if (Test-Path -LiteralPath `$preflightJson) {
+                `$preflightResult = Get-Content -LiteralPath `$preflightJson -Raw -Encoding UTF8 | ConvertFrom-Json
+                `$repairRecommended = [bool]`$preflightResult.RepairRecommended
+            }
+        } catch {
+            Write-Warning "The preflight repair recommendation could not be read: `$(`$_.Exception.Message)"
+        }
+
+        if (`$repairRecommended) {
+            Write-Host ''
+            Write-Host 'A previous failed kiosk left its Windows account/profile registration behind.' -ForegroundColor Yellow
+            Write-Host 'Running the verified recovery procedure; existing profile files will be preserved.' -ForegroundColor Yellow
+            & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Repair
+            `$repairExit = `$LASTEXITCODE
+            if (`$repairExit -eq 10) {
+                Write-Host ''
+                Write-Host 'Recovery completed. Restart this PC, then run this same one-line installer again.' -ForegroundColor Green
+                exit 0
+            }
+            Show-KioskFailureDetails
+            throw "Orphaned kiosk repair returned exit code `$repairExit."
+        }
+
+        Write-Host 'Collecting diagnostics for the failed preflight...' -ForegroundColor Cyan
+        & $quotedPowerShell -NoProfile -ExecutionPolicy Bypass -File $quotedSetup -Mode Diagnose
         Show-KioskFailureDetails
         throw 'Compatibility preflight failed. Nothing was configured. Read the NOT READY reason above.'
     }

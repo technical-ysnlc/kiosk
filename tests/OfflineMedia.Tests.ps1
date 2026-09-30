@@ -81,6 +81,8 @@ try {
     Assert-True ($capturedShortcut.TargetPath -eq $vlc64) 'Shortcut must launch VLC directly.'
     Assert-True ($capturedShortcut.Arguments -ceq '"C:\Users\KioskUser0\Downloads\uchida-kraepelin.mp4"') 'Shortcut must quote the exact requested video path.'
     Assert-True ($warnings.Count -gt 0) 'A missing video should warn, not prevent configuration.'
+    Set-KioskOfflineVideoShortcut -VlcPath $vlc64 -VideoPath 'C:\Users\KioskUser0.YS-LAB-CPU-3\Downloads\uchida-kraepelin.mp4'
+    Assert-True ($capturedShortcut.Arguments -ceq '"C:\Users\KioskUser0.YS-LAB-CPU-3\Downloads\uchida-kraepelin.mp4"') 'Shortcut must support the actual SID-resolved Windows profile path.'
 
     $StatePath = Join-Path $scratch 'State.json'
     $XmlPath = Join-Path $scratch 'AssignedAccess.xml'
