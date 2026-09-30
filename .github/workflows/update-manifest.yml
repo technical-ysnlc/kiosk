@@ -9,6 +9,8 @@ on:
       - Update-SchoolQuizKiosk.ps1
       - install.ps1
       - tests/OfflineMedia.Tests.ps1
+      - tests/Bootstrap.Tests.ps1
+      - tests/AssignedAccessUpdate.Tests.ps1
       - .github/workflows/update-manifest.yml
   workflow_dispatch:
 
@@ -28,6 +30,12 @@ jobs:
       - name: Test offline media with Windows PowerShell 5.1
         shell: powershell
         run: ./tests/OfflineMedia.Tests.ps1
+      - name: Test verified bootstrap launch with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/Bootstrap.Tests.ps1
+      - name: Test account-preserving maintenance with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/AssignedAccessUpdate.Tests.ps1
 
   build-manifest:
     needs: test-windows

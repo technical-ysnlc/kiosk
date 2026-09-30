@@ -48,6 +48,11 @@ setup.ps1
 install.ps1
 README.md
 .github/workflows/update-manifest.yml
+tests/OfflineMedia.Tests.ps1
+tests/Bootstrap.Tests.ps1
+tests/AssignedAccessUpdate.Tests.ps1
+CHECKSUMS.sha256
+SHA256SUMS.txt
 ```
 
 Keep `Update-SchoolQuizKiosk.ps1` as it is.
@@ -60,7 +65,7 @@ Do **not** manually edit `update.json`. GitHub Actions generates it.
 2. Commit them to `main`.
 3. Open **GitHub → Actions**.
 4. Wait for **Update kiosk manifest** to finish successfully.
-5. Confirm `update.json` shows version `2.7.0` and a 40-character `sourceCommit`.
+5. Confirm `update.json` shows version `2.7.1` and a 40-character `sourceCommit`.
 
 ## Fresh Installation
 
@@ -74,9 +79,19 @@ Approve the UAC prompt. The installer verifies the published scripts, installs t
 
 On an already-installed 2.x kiosk, run the same one-line installer again as Administrator to apply app mode, refresh the AI/YouTube filters, install or verify VLC, download the verified offline video, and update Assigned Access when needed. Sign out and back in as the student, or restart Windows, after the update.
 
+Version 2.7.1 uses a separate in-place maintenance operation for allowed apps and Start pins. It retains the saved Assigned Access profile ID, replaces the active configuration directly, and verifies the existing kiosk account SID and registered profile path. If applying the update fails, it attempts to restore the previous active configuration. Maintenance stops when the existing account/configuration cannot be identified.
+
+To **update only the management script** on an installed kiosk, run this as Administrator:
+
+```powershell
+& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramData\SchoolQuizKiosk\Update-SchoolQuizKiosk.ps1" -Mode Update
+```
+
+This verifies and backs up the script before replacing it. It does not apply media or other kiosk configuration changes, create an account, or restart Windows. Run the normal installer to apply maintenance after the new release is published.
+
 ## Offline Uchida-Kraepelin Video
 
-Version 2.7.0 configures the media automatically:
+Version 2.7.1 configures the media automatically:
 
 1. If VLC is missing, the installer downloads the official VideoLAN 3.0.23 64-bit MSI, verifies its pinned SHA-256 checksum, and installs it for all users.
 2. After Windows creates the managed Assigned Access account, the script looks up that account by SID and asks Windows for its registered profile path.
@@ -87,7 +102,7 @@ There is no fixed `C:\Users\KioskUser0` path in this media workflow. If Windows 
 
 The 131,249,563-byte MP4 is intentionally kept on the YSNLC Nextcloud server rather than committed to this Git repository; it exceeds GitHub's 100 MiB limit for an ordinary Git file. The installer uses the public share's direct WebDAV endpoint, not the browser preview page.
 
-After publishing version 2.7.0 and waiting for the manifest workflow to finish, run the normal one-line installer as Administrator. Sign out and back in as the student, or restart Windows. Open **Uchida-Kraepelin** from Start to play the local file offline.
+After publishing version 2.7.1 and waiting for the manifest workflow to finish, run the normal one-line installer as Administrator. Sign out and back in as the student, or restart Windows. Open **Uchida-Kraepelin** from Start to play the local file offline.
 
 The shortcut targets VLC directly with the quoted MP4 path as its argument, so changing Windows' default `.mp4` app is unnecessary. VLC is added to the kiosk's allowed apps. This allows the VLC application, not just this one file. The existing Downloads-only File Explorer restriction is retained.
 
@@ -97,7 +112,7 @@ To apply only the media change with a locally downloaded copy of the updated `se
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -Mode Media
 ```
 
-If the automatic updater has already downloaded version 2.7.0 or later, use the installed copy:
+If the automatic updater has already downloaded version 2.7.1 or later, use the installed copy:
 
 ```powershell
 $k='C:\ProgramData\SchoolQuizKiosk\Setup-SchoolQuizKiosk.ps1'; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $k -Mode Media
@@ -175,11 +190,17 @@ Removal retires the managed account and its Windows profile registration so a la
 
 ## Troubleshooting
 
+### Administrator launch fails with "The parameter is incorrect"
+
+Bootstrap 1.3.0 could exceed Windows' process command length limit because the entire elevated installation procedure was encoded in the launch arguments. Bootstrap 1.3.1 saves that procedure to a temporary file and passes a short verifier command instead. The elevated process verifies the file's SHA-256 and executes exactly those verified bytes, then separately verifies the downloaded setup/updater payloads. It starts from the Windows directory to avoid depending on an old Administrator profile's working directory.
+
+Publish the corrected `install.ps1` and version 2.7.1 setup together, wait for the manifest workflow, then rerun the one-line installer. This particular launch failure occurs before kiosk setup runs.
+
 ### Failed install, deleted ProgramData, or `KioskUser0.<PC-NAME>`
 
 Do not manually delete `C:\Users\KioskUser0` or the `SchoolQuizKiosk` ProgramData folders. A user-profile folder is not the Windows account: the account SID and profile registration remain, and Windows may create a dotted folder such as `KioskUser0.YS-LAB-CPU-3` on the next attempt.
 
-Version 2.7.0 detects this specific orphaned YSNLC Assigned Access account during the normal one-line installation. It verifies that the account/display name and active Assigned Access configuration belong to this kiosk, preserves any old profile directory under:
+Version 2.7.1 detects this specific orphaned YSNLC Assigned Access account during the normal one-line installation. It verifies that the account/display name and active Assigned Access configuration belong to this kiosk, preserves any old profile directory under:
 
 ```text
 C:\Users\SchoolQuizKiosk-Recovered

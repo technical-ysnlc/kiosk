@@ -109,7 +109,7 @@ $BrandingStatePath = Join-Path $Root 'BrandingState.json'
 $BrandingDeviceBackupPath = Join-Path $Root 'BrandingDevice-BeforeKiosk.json'
 $BrandingWallpaperUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Background.png'
 $BrandingProfileUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/YS-Profile.png'
-$KioskVersion = '2.7.0'
+$KioskVersion = '2.7.1'
 $OfflineVideoFileName = 'uchida-kraepelin.mp4'
 $OfflineVideoUrl = 'https://cloud.ysnlc.com/public.php/dav/files/uchida-test/'
 $OfflineVideoShareToken = 'uchida-test'
@@ -1780,8 +1780,18 @@ function Update-SchoolYouTubePolicy {
             -ProfileId ([string]$state.ProfileId) `
             -OfficeApps $officeApps `
             -VlcPath $(if ($state.PSObject.Properties['VlcPath']) { [string]$state.VlcPath } else { '' })
+        $previousXml = if (Test-Path -LiteralPath $XmlPath) { Get-Content -LiteralPath $XmlPath -Raw } else { $null }
         $xml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
-        Invoke-SystemTask -SystemMode Install
+        try {
+            Invoke-SystemTask -SystemMode Update
+        } catch {
+            if ($previousXml) {
+                $previousXml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
+            } else {
+                Remove-Item -LiteralPath $XmlPath -Force -ErrorAction SilentlyContinue
+            }
+            throw
+        }
         Write-Log 'Refreshed Assigned Access Start pins to include YSNLC YouTube Channel.' 'OK'
     }
 
@@ -1822,7 +1832,7 @@ function Update-KioskOfflineMedia {
     if (-not $previousXml -or $previousXml.Trim() -cne $xml.Trim()) {
         $xml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
         try {
-            Invoke-SystemTask -SystemMode Install
+            Invoke-SystemTask -SystemMode Update
         } catch {
             if ($previousXml) {
                 $previousXml | Set-Content -LiteralPath $XmlPath -Encoding UTF8
@@ -1837,6 +1847,7 @@ function Update-KioskOfflineMedia {
     $state | Add-Member -NotePropertyName OfflineVideoPath -NotePropertyValue $resolvedVideoPath -Force
     $state | Add-Member -NotePropertyName OfflineVideoUrl -NotePropertyValue $OfflineVideoUrl -Force
     $state | Add-Member -NotePropertyName OfflineVideoSha256 -NotePropertyValue $OfflineVideoSha256 -Force
+    $state | Add-Member -NotePropertyName Version -NotePropertyValue $KioskVersion -Force
     Write-JsonFile -InputObject $state -Path $StatePath
     Write-Log 'Enabled the Uchida-Kraepelin shortcut and allowed VLC in Assigned Access. Sign out of the student account and sign in again, or restart Windows.' 'OK'
     Complete-WithOptionalRestart -RestartRequired $true
@@ -1961,7 +1972,7 @@ function Copy-ScriptToProgramData {
 }
 
 function Invoke-SystemTask {
-    param([ValidateSet('Install', 'Remove', 'Repair')][string]$SystemMode)
+    param([ValidateSet('Install', 'Update', 'Remove', 'Repair')][string]$SystemMode)
 
     Copy-ScriptToProgramData
     Remove-Item -LiteralPath $SystemResultPath -Force -ErrorAction SilentlyContinue
@@ -1974,7 +1985,9 @@ function Invoke-SystemTask {
 
     $taskName = 'SchoolQuizKiosk-System-' + [Guid]::NewGuid().ToString('N')
     $powerShellPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode {1} -Stage System' -f $InstalledScript, $SystemMode
+    # The system stage reads the operation from the protected request file.
+    $entryMode = if ($SystemMode -eq 'Update') { 'Install' } else { $SystemMode }
+    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode {1} -Stage System' -f $InstalledScript, $entryMode
 
     $action = New-ScheduledTaskAction -Execute $powerShellPath -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(1)
@@ -2009,6 +2022,74 @@ function Invoke-SystemTask {
         Write-Log ([string]$result.Message) 'OK'
     } finally {
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+}
+
+function Set-AssignedAccessConfigurationInPlace {
+    param(
+        [Parameter(Mandatory = $true)]$Instance,
+        [Parameter(Mandatory = $true)][string]$Xml
+    )
+
+    $previousConfiguration = [string]$Instance.Configuration
+    if ([string]::IsNullOrWhiteSpace($previousConfiguration)) {
+        throw 'The active Assigned Access configuration is missing. Maintenance refused to create a replacement account; run diagnostics.'
+    }
+    [xml]$previous = [Net.WebUtility]::HtmlDecode($previousConfiguration)
+    [xml]$next = $Xml
+    $previousAccount = $previous.SelectSingleNode('//*[local-name()="AutoLogonAccount"]')
+    $nextAccount = $next.SelectSingleNode('//*[local-name()="AutoLogonAccount"]')
+    $previousProfile = $previous.SelectSingleNode('//*[local-name()="DefaultProfile"]')
+    $nextProfile = $next.SelectSingleNode('//*[local-name()="DefaultProfile"]')
+    $displayNamespace = 'http://schemas.microsoft.com/AssignedAccess/201810/config'
+    if (-not $previousAccount -or -not $nextAccount -or -not $previousProfile -or -not $nextProfile) {
+        throw 'Maintenance requires an existing managed auto-logon kiosk configuration.'
+    }
+    $accountDisplayName = $previousAccount.GetAttribute('DisplayName', $displayNamespace)
+    if ([string]::IsNullOrWhiteSpace($accountDisplayName) -or
+        $accountDisplayName -cne $nextAccount.GetAttribute('DisplayName', $displayNamespace) -or
+        $previousProfile.GetAttribute('Id') -ine $nextProfile.GetAttribute('Id')) {
+        throw 'Maintenance refused to change the managed account display name or Assigned Access profile ID.'
+    }
+
+    $kioskUsersBefore = @(Get-LocalUser -ErrorAction Stop | Where-Object { $_.Name -like 'kioskUser*' })
+    $managedUsers = @($kioskUsersBefore | Where-Object { [string]$_.FullName -ceq $accountDisplayName })
+    if ($managedUsers.Count -ne 1) {
+        throw 'Maintenance could not identify exactly one existing managed kiosk account. Run diagnostics before changing configuration.'
+    }
+    $managedUser = $managedUsers[0]
+    $sid = [string]$managedUser.SID
+    $profileBefore = Get-CimInstance Win32_UserProfile -Filter ("SID='{0}'" -f $sid.Replace("'", "''")) -ErrorAction Stop | Select-Object -First 1
+    $profilePathBefore = if ($profileBefore) { [string]$profileBefore.LocalPath } else { $null }
+    $sidsBefore = @($kioskUsersBefore | ForEach-Object { [string]$_.SID })
+
+    try {
+        # Replace directly: never clear Configuration during a maintenance update.
+        $Instance.Configuration = [Net.WebUtility]::HtmlEncode($Xml)
+        Set-CimInstance -CimInstance $Instance -ErrorAction Stop | Out-Null
+
+        $kioskUsersAfter = @(Get-LocalUser -ErrorAction Stop | Where-Object { $_.Name -like 'kioskUser*' })
+        $sameUser = @($kioskUsersAfter | Where-Object { [string]$_.SID -ceq $sid -and [string]$_.Name -ceq [string]$managedUser.Name })
+        $newUsers = @($kioskUsersAfter | Where-Object { $sidsBefore -notcontains ([string]$_.SID) })
+        if ($sameUser.Count -ne 1 -or $newUsers.Count -gt 0) {
+            throw 'Windows changed the managed kiosk account during maintenance. The previous configuration will be restored; review diagnostics.'
+        }
+        if ($profilePathBefore) {
+            $profileAfter = Get-CimInstance Win32_UserProfile -Filter ("SID='{0}'" -f $sid.Replace("'", "''")) -ErrorAction Stop | Select-Object -First 1
+            if (-not $profileAfter -or [string]$profileAfter.LocalPath -ine $profilePathBefore) {
+                throw 'Windows changed the managed profile path during maintenance. The previous configuration will be restored; review diagnostics.'
+            }
+        }
+        Write-Log "Updated Assigned Access in place; preserved account SID $sid and profile path $profilePathBefore." 'OK'
+    } catch {
+        $updateError = $_
+        try {
+            $Instance.Configuration = $previousConfiguration
+            Set-CimInstance -CimInstance $Instance -ErrorAction Stop | Out-Null
+        } catch {
+            throw "Assigned Access update failed: $($updateError.Exception.Message) Restoring the previous configuration also failed: $($_.Exception.Message)"
+        }
+        throw $updateError
     }
 }
 
@@ -2061,6 +2142,13 @@ function Invoke-AssignedAccessSystemStage {
             Write-JsonFile -Path $SystemResultPath -InputObject ([ordered]@{
                 Success = $true
                 Message = 'Windows Assigned Access configuration was applied successfully.'
+            })
+        } elseif ([string]$request.Mode -eq 'Update') {
+            $xml = Get-Content -LiteralPath ([string]$request.XmlPath) -Raw -Encoding UTF8
+            Set-AssignedAccessConfigurationInPlace -Instance $instance -Xml $xml
+            Write-JsonFile -Path $SystemResultPath -InputObject ([ordered]@{
+                Success = $true
+                Message = 'Assigned Access was updated in place and the existing account SID/profile path were verified.'
             })
         } elseif ([string]$request.Mode -eq 'Remove') {
             if (Test-Path -LiteralPath $AssignedAccessBackupPath) {

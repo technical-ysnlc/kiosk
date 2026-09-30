@@ -17,7 +17,7 @@ foreach ($statement in $setupAst.EndBlock.Statements) {
     if ($statement -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
         . ([scriptblock]::Create($statement.Extent.Text))
     } elseif ($statement -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-        $statement.Left.Extent.Text -in @('$OfflineVideoFileName', '$OfflineVideoShortcutName', '$OfflineVideoUrl', '$OfflineVideoSha256')) {
+        $statement.Left.Extent.Text -in @('$KioskVersion', '$OfflineVideoFileName', '$OfflineVideoShortcutName', '$OfflineVideoUrl', '$OfflineVideoSha256')) {
         . ([scriptblock]::Create($statement.Extent.Text))
     }
 }
@@ -105,6 +105,7 @@ try {
     $script:failApply = $false
     function Invoke-SystemTask {
         param($SystemMode)
+        Assert-True ($SystemMode -eq 'Update') 'Maintenance must use in-place update, never fresh installation or removal.'
         $script:applyCount++
         if ($script:failApply) { throw 'Simulated policy failure' }
     }
@@ -114,7 +115,7 @@ try {
     Update-KioskOfflineMedia
     Assert-True ($applyCount -eq 1) 'An existing kiosk must receive the updated policy.'
     $updated = Read-JsonFile -Path $StatePath
-    Assert-True ($updated.VlcPath -eq $vlc64 -and $updated.OfflineVideoPath -eq $dynamicVideoPath -and $updated.ProfileId -eq $state.ProfileId -and $updated.DisabledLocalUserName -eq 'YSNLC') 'Media update must persist the resolved media path and preserve kiosk identity/state.'
+    Assert-True ($updated.VlcPath -eq $vlc64 -and $updated.OfflineVideoPath -eq $dynamicVideoPath -and $updated.ProfileId -eq $state.ProfileId -and $updated.DisabledLocalUserName -eq 'YSNLC' -and $updated.Version -eq $KioskVersion) 'Media update must persist the resolved media path/version and preserve kiosk identity/state.'
     Update-KioskOfflineMedia
     Assert-True ($applyCount -eq 1) 'A repeat media update must not reapply unchanged policy.'
 

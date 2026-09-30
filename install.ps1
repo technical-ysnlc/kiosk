@@ -12,9 +12,8 @@
   verifies setup.ps1 and Update-SchoolQuizKiosk.ps1, requests administrator elevation,
   installs the kiosk, installs the scheduled updater, and schedules a Windows restart.
 
-  Re-running the command on a computer with an active SchoolQuizKiosk installation does not
-  reinstall or reconfigure Assigned Access. It refreshes the YSNLC-Student wallpaper/profile
-  branding using the latest verified setup payload, then installs or repairs the automatic updater.
+  Re-running the command on an active 2.x kiosk performs maintenance using its existing account
+  and profile. Allowed apps and Start pins are updated in place when necessary.
 
   The setup and updater payloads are saved to disk before execution because setup.ps1 relies
   on its own file path for elevation and its LocalSystem configuration stage.
@@ -24,7 +23,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$BootstrapVersion = '1.3.0'
+$BootstrapVersion = '1.3.1'
 $ManifestUrl = 'https://raw.githubusercontent.com/technical-ysnlc/kiosk/main/update.json'
 $ExpectedProductId = 'school-quiz-kiosk'
 $ExpectedRepositoryPath = '/technical-ysnlc/kiosk/'
@@ -183,6 +182,36 @@ function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function New-VerifiedBootstrapArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{64}$')][string]$ExpectedHash
+    )
+
+    $quotedPath = Quote-PowerShellLiteral -Value $ScriptPath
+    # Only this small verifier is passed on the command line. Execute the same bytes
+    # that were hashed so replacing the temporary file during UAC cannot inject code.
+    $loader = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    `$bytes = [IO.File]::ReadAllBytes($quotedPath)
+    `$sha = [Security.Cryptography.SHA256]::Create()
+    try { `$actual = ([BitConverter]::ToString(`$sha.ComputeHash(`$bytes))).Replace('-', '').ToLowerInvariant() } finally { `$sha.Dispose() }
+    if (`$actual -cne '$ExpectedHash') { throw 'The elevated bootstrap changed after verification. No installer code was executed.' }
+    & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString(`$bytes)))
+} catch {
+    Write-Error `$_ -ErrorAction Continue
+    exit 1
+}
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
+    if ($arguments.Length -gt 8000) {
+        throw 'The temporary bootstrap path is too long to launch safely. Use a shorter Windows TEMP path.'
+    }
+    return $arguments
 }
 
 function Quote-PowerShellLiteral {
@@ -520,8 +549,10 @@ try {
 }
 "@
 
-    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevatedCode))
-    $argumentList = "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand"
+    $elevatedScriptPath = Join-Path $TempRoot 'elevated-install.ps1'
+    [IO.File]::WriteAllText($elevatedScriptPath, $elevatedCode, (New-Object Text.UTF8Encoding $false))
+    $elevatedScriptHash = Get-Sha256Hex -Path $elevatedScriptPath
+    $argumentList = New-VerifiedBootstrapArguments -ScriptPath $elevatedScriptPath -ExpectedHash $elevatedScriptHash
 
     Write-Host ''
     if (-not (Test-IsAdministrator)) {
@@ -530,12 +561,14 @@ try {
             -FilePath $PowerShellPath `
             -Verb RunAs `
             -ArgumentList $argumentList `
+            -WorkingDirectory $env:SystemRoot `
             -Wait `
             -PassThru
     } else {
         $process = Start-Process `
             -FilePath $PowerShellPath `
             -ArgumentList $argumentList `
+            -WorkingDirectory $env:SystemRoot `
             -Wait `
             -PassThru
     }
